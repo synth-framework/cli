@@ -58,14 +58,14 @@ function regularFileExists(location: string): boolean {
 
 export function readRecord(location: string): WorkRecord {
   if (!regularFileExists(location)) throw notFound(location);
-  let text: string;
+  let bytes: Buffer;
   try {
-    text = readFileSync(location, 'utf8');
+    bytes = readFileSync(location);
   } catch (error) {
     if (hasErrorCode(error, 'ENOENT')) throw notFound(location);
     throw ioError('read', location, error);
   }
-  return decodeRecord(text, location);
+  return decodeRecord(bytes, location);
 }
 
 /** A lock coordinates only writers that use the same path and honor this protocol. */

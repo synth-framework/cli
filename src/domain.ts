@@ -73,7 +73,7 @@ function validId(id: unknown, kind: EntryKind): id is string {
 }
 
 /** Reject anything this version would not preserve on its next write. */
-export function decodeRecord(text: string, location: string): WorkRecord {
+export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
   const corrupt = (detail: string): never => {
     throw new SynthError(
       'RECORD_CORRUPT',
@@ -82,6 +82,13 @@ export function decodeRecord(text: string, location: string): WorkRecord {
     );
   };
 
+  let text: string;
+  try {
+    // Keep a BOM visible to JSON.parse, matching the previous JSON policy.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return corrupt('invalid UTF-8');
+  }
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;

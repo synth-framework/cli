@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   cpSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -14,9 +18,10 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -46,8 +51,32 @@ function npm(args, cwd) {
   return result.stdout;
 }
 
+function assertIsolatedSandbox(location) {
+  const fromRepository = relative(realpathSync(repository), location);
+  assert.ok(
+    fromRepository === '..' || fromRepository.startsWith(`..${sep}`),
+    `Installed fixture must be outside the checkout: ${location}`,
+  );
+  for (let ancestor = location; ; ancestor = dirname(ancestor)) {
+    try {
+      lstatSync(join(ancestor, '.git'));
+      assert.fail(`Installed fixture must not inherit a Git worktree: ${ancestor}`);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (dirname(ancestor) === ancestor) break;
+  }
+}
+
 before(() => {
   sandbox = realpathSync(mkdtempSync(join(tmpdir(), 'synth-installed-test-')));
+  try {
+    assertIsolatedSandbox(sandbox);
+  } catch (error) {
+    rmSync(sandbox, { recursive: true, force: true });
+    sandbox = undefined;
+    throw error;
+  }
   const packOutput = npm(['pack', '--json', '--ignore-scripts', '--pack-destination', sandbox], repository);
   const pack = JSON.parse(packOutput);
   assert.equal(pack.length, 1);
@@ -161,6 +190,56 @@ function snapshotTree(directory) {
   walk(directory);
   return entries;
 }
+
+function probeSandboxSetup(tempDirectory) {
+  const probe = mkdtempSync(join(sandbox, 'sandbox-probe-'));
+  const bin = join(probe, 'bin');
+  mkdirSync(bin);
+  const marker = join(probe, 'npm-ran');
+  writeFileSync(join(bin, 'npm'), '#!/bin/sh\n: > "$SYNTH_TEST_NPM_MARKER"\nexit 97\n', { mode: 0o755 });
+  const target = '^minimal intention works in the independent, non-Git fixture and shows missing context$';
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: '',
+    TMPDIR: tempDirectory,
+    PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+    SYNTH_TEST_NPM_MARKER: marker,
+  };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, ['--test', `--test-name-pattern=${target}`, fileURLToPath(import.meta.url)], {
+    cwd: repository,
+    encoding: 'utf8',
+    timeout: 15_000,
+    maxBuffer: 8 * 1024 * 1024,
+    env,
+  });
+  assert.equal(result.error, undefined, `Sandbox probe could not run: ${result.error}`);
+  assert.notEqual(result.status, 0, `An unsafe sandbox unexpectedly passed setup:\n${result.stdout}\n${result.stderr}`);
+  assert.equal(existsSync(marker), false, 'Unsafe setup reached npm before rejecting the sandbox.');
+  return `${result.stdout}\n${result.stderr}`;
+}
+
+test('fixture setup rejects TMPDIR inside the checkout before invoking npm', () => {
+  const root = realpathSync(repository);
+  const alias = join(sandbox, 'checkout-alias');
+  symlinkSync(root, alias, 'dir');
+  const existing = readdirSync(root).filter((name) => name.startsWith('synth-installed-test-')).sort();
+  for (const tempDirectory of [root, alias]) {
+    assert.match(probeSandboxSetup(tempDirectory), /Installed fixture must be outside the checkout/);
+  }
+  assert.deepEqual(readdirSync(root).filter((name) => name.startsWith('synth-installed-test-')).sort(), existing);
+});
+
+test('fixture setup rejects an unrelated Git ancestor before invoking npm', () => {
+  for (const markerKind of ['directory', 'file']) {
+    const parent = join(sandbox, `unrelated-worktree-${markerKind}`);
+    mkdirSync(parent);
+    if (markerKind === 'directory') mkdirSync(join(parent, '.git'));
+    else writeFileSync(join(parent, '.git'), 'gitdir: /example/other-git-directory\n');
+    assert.match(probeSandboxSetup(parent), /Installed fixture must not inherit a Git worktree/);
+    assert.deepEqual(readdirSync(parent), ['.git']);
+  }
+});
 
 test('minimal intention works in the independent, non-Git fixture and shows missing context', () => {
   const dir = fixture();
@@ -374,6 +453,42 @@ test('corrupt, unsupported, and structurally invalid records are visible and nev
   }
 });
 
+test('malformed UTF-8 is rejected on reads and writes without changing record bytes', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Claim X must be preserved', '--json']), 'add');
+  const file = recordFile(dir);
+  const valid = readFileSync(file);
+  const marker = Buffer.from('Claim X must be preserved');
+  const start = valid.indexOf(marker);
+  assert.notEqual(start, -1);
+  const damaged = Buffer.from(valid);
+  damaged[start + marker.indexOf('X')] = 0xff;
+  writeFileSync(file, damaged);
+
+  jsonFailure(run(dir, ['status', '--json']), 3, 'RECORD_CORRUPT');
+  assert.deepEqual(readFileSync(file), damaged);
+  jsonFailure(run(dir, ['add', 'gap', '--text', 'Unrelated write', '--json']), 3, 'RECORD_CORRUPT');
+  assert.deepEqual(readFileSync(file), damaged);
+  assert.equal(existsSync(`${file}.lock`), false);
+});
+
+test('a genuine replacement character is valid, while a leading UTF-8 BOM stays invalid JSON', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'A genuine � is allowed', '--json']), 'add');
+  const file = recordFile(dir);
+  const valid = readFileSync(file);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].text, 'A genuine � is allowed');
+  const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), valid]);
+  writeFileSync(file, withBom);
+  jsonFailure(run(dir, ['status', '--json']), 3, 'RECORD_CORRUPT');
+  jsonFailure(run(dir, ['add', 'gap', '--text', 'Do not rewrite', '--json']), 3, 'RECORD_CORRUPT');
+  assert.deepEqual(readFileSync(file), withBom);
+  assert.equal(existsSync(`${file}.lock`), false);
+});
+
 test('invalid batches and missing question references never partially modify a record', () => {
   const dir = fixture();
   initialize(dir);
@@ -385,6 +500,7 @@ test('invalid batches and missing question references never partially modify a r
     JSON.stringify([{ kind: 'gap', text: 'Valid' }, { kind: 'answer', questionId: 'Q404', text: 'No such question' }]),
     JSON.stringify([{ kind: 'gap', text: 'Valid', surprise: true }]),
     JSON.stringify(Array.from({ length: 101 }, () => ({ kind: 'gap', text: 'Too many' }))),
+    Buffer.concat([Buffer.from('[{"kind":"gap","text":"'), Buffer.from([0xff]), Buffer.from('"}]')]),
     ' '.repeat(1024 * 1024 + 1),
   ];
   for (const input of inputs) {
@@ -394,6 +510,94 @@ test('invalid batches and missing question references never partially modify a r
   }
   jsonFailure(run(dir, ['add', 'criterion', '--text', ' ', '--json']), 2, 'USAGE_ERROR');
   assert.equal(readFileSync(file, 'utf8'), original);
+});
+
+test('nonblocking FIFO stdin waits for a delayed producer', { timeout: 10_000 }, async (t) => {
+  if (!['linux', 'darwin'].includes(process.platform)) {
+    t.skip('This regression requires a POSIX nonblocking FIFO.');
+    return;
+  }
+  const dir = fixture();
+  const fifo = join(dir, 'agent-input.fifo');
+  const created = spawnSync('mkfifo', [fifo], { encoding: 'utf8', timeout: 5_000 });
+  if (created.error?.code === 'ENOENT') {
+    t.skip('The POSIX mkfifo utility is unavailable.');
+    return;
+  }
+  assert.equal(created.error, undefined);
+  assert.equal(created.status, 0, created.stderr);
+  initialize(dir);
+
+  // The preload only signals when either input-reading strategy starts; it does
+  // not change the pipe flags or the result of a read.
+  const marker = 'SYNTH_TEST_STDIN_STARTED\n';
+  const preload = join(dir, 'trace-stdin.cjs');
+  writeFileSync(preload, `
+    const fs = require('node:fs');
+    const mark = () => fs.writeSync(2, ${JSON.stringify(marker)});
+    const read = fs.readSync;
+    fs.readSync = function (fd, ...args) { if (fd === 0) mark(); return read.call(this, fd, ...args); };
+    const stdin = process.stdin;
+    const iterator = stdin[Symbol.asyncIterator];
+    stdin[Symbol.asyncIterator] = function (...args) { mark(); return iterator.apply(this, args); };
+    require('node:module').syncBuiltinESMExports();
+  `);
+  let reader = null;
+  let writer = null;
+  let child;
+  t.after(() => {
+    if (reader !== null) closeSync(reader);
+    if (writer !== null) closeSync(writer);
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  });
+  reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+  writer = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+  child = spawn(process.execPath, ['--require', preload, executable(dir), 'add', '--stdin', '--json'], {
+    cwd: dir,
+    stdio: [reader, 'pipe', 'pipe'],
+  });
+  closeSync(reader);
+  reader = null;
+
+  let stdout = '';
+  let stderr = '';
+  let signalReady;
+  const ready = new Promise((resolveReady) => { signalReady = resolveReady; });
+  child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding('utf8').on('data', (chunk) => {
+    stderr += chunk;
+    if (stderr.includes(marker)) signalReady(true);
+  });
+  const closed = new Promise((resolveClosed, reject) => {
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolveClosed({ status, signal, stdout, stderr }));
+  });
+  const enteredRead = await Promise.race([ready, closed.then(() => false)]);
+  assert.equal(enteredRead, true, `CLI exited before reading stdin: ${stderr}`);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+  let producerError;
+  const text = 'Delayed 🌱 nonblocking input';
+  const payload = Buffer.from(JSON.stringify([{ kind: 'gap', text }]));
+  const character = Buffer.from('🌱');
+  const characterStart = payload.indexOf(character);
+  assert.notEqual(characterStart, -1);
+  const split = characterStart + 2;
+  try {
+    assert.equal(writeSync(writer, payload.subarray(0, split)), split);
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+    assert.equal(writeSync(writer, payload.subarray(split)), payload.length - split);
+  } catch (error) {
+    producerError = error;
+  } finally {
+    closeSync(writer);
+    writer = null;
+  }
+  const result = await closed;
+  assert.equal(producerError, undefined, `Delayed producer failed: ${producerError}; CLI stderr: ${result.stderr}`);
+  result.stderr = result.stderr.split(marker).join('');
+  const added = jsonSuccess(result, 'add');
+  assert.equal(added.entries.length, 1);
+  assert.equal(added.entries[0].text, text);
 });
 
 function runAsync(directory, args) {

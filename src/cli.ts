@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { readSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput } from './domain.js';
 import { SynthError, usageError } from './errors.js';
@@ -10,17 +9,15 @@ const CLI_VERSION = '0.1.0';
 const OUTPUT_VERSION = 1;
 const MAX_STDIN_BYTES = 1024 * 1024;
 
-function readStdin(): string {
+async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
-  const buffer = Buffer.alloc(64 * 1024);
   try {
-    while (true) {
-      const count = readSync(0, buffer, 0, buffer.length, null);
-      if (count === 0) break;
-      total += count;
+    for await (const chunk of process.stdin) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += bytes.length;
       if (total > MAX_STDIN_BYTES) throw usageError('Standard input exceeds the 1 MiB limit.');
-      chunks.push(Buffer.from(buffer.subarray(0, count)));
+      chunks.push(bytes);
     }
   } catch (error) {
     if (error instanceof SynthError) throw error;
@@ -33,8 +30,8 @@ function readStdin(): string {
   }
 }
 
-function readBatch(): ReturnType<typeof parseEntryBatch> {
-  const input = readStdin();
+async function readBatch(): Promise<ReturnType<typeof parseEntryBatch>> {
+  const input = await readStdin();
   let parsed: unknown;
   try {
     parsed = JSON.parse(input) as unknown;
@@ -44,7 +41,7 @@ function readBatch(): ReturnType<typeof parseEntryBatch> {
   return parseEntryBatch(parsed);
 }
 
-function main(argv: string[]): void {
+async function main(argv: string[]): Promise<void> {
   // Preserve structured errors even if argument parsing itself fails.
   const jsonRequested = argv.includes('--json');
   let command: string | null = null;
@@ -127,7 +124,7 @@ function main(argv: string[]): void {
         if (positionals.length !== 1 || values.text !== undefined || values.reason !== undefined || values.question !== undefined) {
           throw usageError('Use add --stdin alone for input, without a kind, --text, --reason, or --question.');
         }
-        inputs = readBatch();
+        inputs = await readBatch();
       } else {
         if (positionals.length !== 2) throw usageError('Use add <kind> --text <text>, or add --stdin.');
         const input: Record<string, unknown> = { kind: positionals[1], text: values.text };
@@ -165,4 +162,4 @@ function main(argv: string[]): void {
   }
 }
 
-main(process.argv.slice(2));
+await main(process.argv.slice(2));

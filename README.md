@@ -106,6 +106,12 @@ with npm's offline mode and lifecycle scripts disabled, and invokes the
 installed executable. No package is published. The fixture has its own project
 configuration and does not import SYNTH internals.
 
+The resolved temporary directory must be outside the checkout and have no
+`.git` marker in its ancestors; otherwise setup fails before packaging. If
+necessary, choose a safe `TMPDIR` and rerun the tests. On macOS and Linux, the
+nonblocking-input regression uses the POSIX `mkfifo` utility and reports a skip
+when it is unavailable; a skipped regression is not a verified result.
+
 ### Exact macOS validation procedure
 
 On a macOS machine with this checkout and Node.js 22 or newer, run:
@@ -124,7 +130,9 @@ macOS design target is not a substitute for running this procedure on macOS.
 A separate remote workspace/container should likewise be reported as tested
 only after the procedure is run there.
 
-For an interactive fixture walkthrough from the repository root:
+For an interactive fixture walkthrough from the repository root, first choose a
+`TMPDIR` outside the checkout and without a `.git` ancestor. Unlike the test
+setup, these manual commands do not enforce that isolation:
 
 ```sh
 npm run build
