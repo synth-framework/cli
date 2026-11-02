@@ -1,0 +1,25 @@
+{
+  "name": "@synth-framework/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An agent-first CLI for durable work context",
+  "type": "module",
+  "bin": {
+    "synth": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/installed.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
