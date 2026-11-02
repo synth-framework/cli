@@ -1,9 +1,10 @@
 # SYNTH
 
 SYNTH is an agent-first CLI for keeping a bounded work intention and its
-context available to a developer and coding agent. This first slice captures
-and resumes work; it does **not** run checks or record evidence, evaluations,
-review, or acceptance. Criteria remain unverified.
+context available to a developer and coding agent. It captures and resumes
+work, runs explicitly selected checks, and records attributed evidence and
+criterion evaluations. It does **not** record review or acceptance. A check,
+evidence item, evaluation, and acceptance are different things.
 
 The CLI targets Node.js 22+ on macOS and Linux, including agent workspaces.
 Platform targets are not a claim that a particular environment was tested.
@@ -34,7 +35,7 @@ are recorded responses, not proof they are correct or that a question is
 resolved; additional answers are retained. A missing entry is shown as
 **not recorded**, not as proof that it is unnecessary.
 
-Entries are append-only in this slice: plans and decisions are not automatically
+Context entries are append-only: plans and decisions are not automatically
 superseded, and gaps and next actions are not automatically marked resolved or
 complete. To communicate a change, add a work `update` that explicitly refers to
 the relevant IDs. These updates are recorded statements, not verification; a
@@ -51,6 +52,68 @@ printf '%s' '[{"kind":"outcome","text":"Titles behave predictably"},{"kind":"pla
 UTF-8. Each has `kind` and `text`, with optional `reason`; an `answer` also
 requires `questionId`. If an entry is invalid, none of that batch is written.
 
+## Selected checks, evidence, and evaluations
+
+Only run a command after inspecting and explicitly selecting it. In the Tiny
+Notes fixture, after the quick start above:
+
+```sh
+synth check run --criterion C1 --cwd . --timeout-ms 30000 --capture-output --json -- node --test test/title.test.js
+synth evidence add --criterion C1 --summary 'Outcome recorded in CHK1' --source 'Check CHK1' --subject 'Tiny Notes title test' --limitations 'This test does not cover whitespace-only titles' --check CHK1 --subject-file src/title.js --json
+synth evaluate C1 --status inconclusive --reason 'The recorded test does not cover the stated criterion' --evidence E1 --json
+synth handoff --json
+```
+
+`check run` executes only the executable and arguments after `--`, without an
+implicit shell. Repeat `--criterion` for several criteria. `--cwd` defaults to
+the current directory. The default timeout is 30 seconds; `--timeout-ms` accepts
+1–300000 milliseconds. The command inherits the environment, receives closed
+stdin, and is **not sandboxed**: it can read or change files, access a network,
+or launch other programs. Review its arguments and repository scripts first.
+Arguments and the working directory are stored in the record; do not put
+secrets there. Environment variables are not recorded.
+
+Before running, choose `--capture-output` or `--output-ref <reference>` (or
+both). Capture stores at most 16 KiB per stream, decoded as potentially lossy
+UTF-8 with truncation flags; it can contain secrets and is stored in the local
+record. Without capture, output is discarded and only byte counts are recorded.
+An output reference is caller-provided; SYNTH does not inspect or create the
+artifact or redact sensitive data. Check `status`, not just the CLI exit code:
+a successfully recorded failed or timed-out check still returns CLI exit 0 and
+`ok: true`. That says the result was recorded, **not** that the check passed.
+
+Use `check record` with `--status skipped` or `--status inconclusive`, a
+`--reason`, and the command after `--` to record a caller-reported check without
+running it. A run can also end as failed, timed out, interrupted, or unable to
+start. Before launching a process, SYNTH records a pending request, then
+releases the record lock while it runs and records the outcome afterward. A
+pending entry means the command may or may not have started. SIGINT and SIGTERM
+request termination of the process group on POSIX; termination is best effort,
+not a sandbox. SIGKILL, a crash, escaped descendants, or a failed final write can
+leave a pending entry or a running process. Inspect both before retrying; SYNTH
+does not automatically retry.
+
+`--revision` and `--dirty clean|dirty|unknown` on checks are caller-reported;
+if absent they are unknown. SYNTH does not run Git or infer a clean tree.
+Evidence requires a source, subject, and limitations. Checks and evidence can
+be recorded before criteria exist; omitted links remain visible as unlinked.
+Recording a passing check or adding evidence does not automatically evaluate a
+criterion. An evaluation explicitly links its cited evidence to its criterion,
+but that link is a caller's assessment of relevance, not verified coverage. An
+evaluation is a reasoned, recorded assessment: `unverified`, `supported`,
+`contradicted`, `inconclusive`, or `not_applicable`. Every non-unverified
+evaluation requires cited evidence. The latest assessment is displayed and the
+history is retained; none is an acceptance decision.
+
+Optional `--subject-file` fingerprints one explicitly selected regular file
+with SHA-256 at **evidence-recording time** (maximum 8 MiB, no final symlink).
+A later handoff reports `matching`, `changed`, or `unknown` separately from the
+evaluation. `matching` means only those file bytes match that snapshot: it does
+not prove the check examined that version, cover other inputs, establish
+adequacy, or assess semantic drift. Missing/unreadable/oversized files or no
+snapshot can leave freshness unknown. A missing file after a captured snapshot
+is shown as changed. Revision labels and artifact references are not verified.
+
 ## JSON and errors
 
 With `--json`, a successful command writes one JSON object to stdout:
@@ -60,7 +123,18 @@ An error writes `{ "outputVersion": 1, "ok": false, "command": null,
 parsed command name when available, otherwise null. The record has its own
 `schemaVersion`. Exit codes are 0 for success, 2 for invalid usage or
 input, 3 for state/storage errors, and 1 for an unexpected internal error.
-Unverified criteria do not make a read-only command fail.
+Unverified criteria do not make a read-only command fail. For an interrupted
+check, SYNTH records the result when possible and exits 130 for SIGINT or 143
+for SIGTERM. Arguments after `--` belong to the selected command, including any
+`--json` argument there.
+
+The envelope remains output version 1; Slice 2 adds fields and expands criterion
+evaluation values. Consumers should inspect `outputVersion` and tolerate added
+fields. Record schema 1 is read without modification; the first successful
+write upgrades it atomically to schema 2, retaining existing entries and adding
+the previously absent check/evidence/evaluation collections. Older Slice 1
+binaries cannot read schema 2. Unsupported schemas and corrupt records remain
+untouched; keep a backup if backward compatibility is needed.
 
 ## Local storage and recovery
 
