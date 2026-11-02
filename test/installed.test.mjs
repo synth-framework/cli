@@ -51,19 +51,34 @@ function npm(args, cwd) {
   return result.stdout;
 }
 
+function pathEntryExists(location) {
+  try {
+    lstatSync(location);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function assertIsolatedSandbox(location) {
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY']) {
+    assert.ok(process.env[name] === undefined, `Installed fixture requires ${name} to be unset.`);
+  }
   const fromRepository = relative(realpathSync(repository), location);
   assert.ok(
     fromRepository === '..' || fromRepository.startsWith(`..${sep}`),
     `Installed fixture must be outside the checkout: ${location}`,
   );
   for (let ancestor = location; ; ancestor = dirname(ancestor)) {
-    try {
-      lstatSync(join(ancestor, '.git'));
-      assert.fail(`Installed fixture must not inherit a Git worktree: ${ancestor}`);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+    assert.ok(!pathEntryExists(join(ancestor, '.git')), `Installed fixture must not inherit a Git worktree: ${ancestor}`);
+    // Git directories can be discovered without a .git marker. This is a
+    // conservative layout check, not a complete Git discovery implementation.
+    const gitLayout = pathEntryExists(join(ancestor, 'HEAD')) && (
+      pathEntryExists(join(ancestor, 'commondir')) ||
+      (pathEntryExists(join(ancestor, 'objects')) && pathEntryExists(join(ancestor, 'refs')))
+    );
+    assert.ok(!gitLayout, `Installed fixture must not inherit Git repository metadata: ${ancestor}`);
     if (dirname(ancestor) === ancestor) break;
   }
 }
@@ -191,7 +206,7 @@ function snapshotTree(directory) {
   return entries;
 }
 
-function probeSandboxSetup(tempDirectory) {
+function probeSandboxSetup(tempDirectory, extraEnv = {}) {
   const probe = mkdtempSync(join(sandbox, 'sandbox-probe-'));
   const bin = join(probe, 'bin');
   mkdirSync(bin);
@@ -200,6 +215,7 @@ function probeSandboxSetup(tempDirectory) {
   const target = '^minimal intention works in the independent, non-Git fixture and shows missing context$';
   const env = {
     ...process.env,
+    ...extraEnv,
     NODE_OPTIONS: '',
     TMPDIR: tempDirectory,
     PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
@@ -238,6 +254,43 @@ test('fixture setup rejects an unrelated Git ancestor before invoking npm', () =
     else writeFileSync(join(parent, '.git'), 'gitdir: /example/other-git-directory\n');
     assert.match(probeSandboxSetup(parent), /Installed fixture must not inherit a Git worktree/);
     assert.deepEqual(readdirSync(parent), ['.git']);
+  }
+});
+
+test('fixture setup rejects an unrelated bare Git repository ancestor before invoking npm', () => {
+  for (const layout of ['standard', 'common-directory']) {
+    const parent = join(sandbox, `unrelated-bare-${layout}`);
+    const common = layout === 'standard' ? parent : join(sandbox, 'unrelated-common-directory');
+    mkdirSync(parent);
+    if (common !== parent) mkdirSync(common);
+    mkdirSync(join(common, 'objects'));
+    mkdirSync(join(common, 'refs'));
+    writeFileSync(join(common, 'config'), '[core]\n\trepositoryformatversion = 0\n\tbare = true\n');
+    writeFileSync(join(parent, 'HEAD'), 'ref: refs/heads/unborn\n');
+    if (common !== parent) writeFileSync(join(parent, 'commondir'), `${common}\n`);
+    assert.match(probeSandboxSetup(parent), /Installed fixture must not inherit Git repository metadata/);
+    assert.deepEqual(
+      readdirSync(parent).sort(),
+      layout === 'standard' ? ['HEAD', 'config', 'objects', 'refs'] : ['HEAD', 'commondir'],
+    );
+  }
+});
+
+test('fixture setup rejects inherited Git discovery overrides before invoking npm', () => {
+  const parent = join(sandbox, 'git-environment-probe');
+  mkdirSync(parent);
+  const gitDirectory = join(realpathSync(repository), '.git');
+  const overrides = [
+    ['GIT_DIR', gitDirectory],
+    ['GIT_WORK_TREE', gitDirectory],
+    ['GIT_COMMON_DIR', gitDirectory],
+    ['GIT_OBJECT_DIRECTORY', gitDirectory],
+    ['GIT_DIR', ''],
+    ['GIT_OBJECT_DIRECTORY', ''],
+  ];
+  for (const [name, value] of overrides) {
+    assert.match(probeSandboxSetup(parent, { [name]: value }), new RegExp(`Installed fixture requires ${name} to be unset`));
+    assert.deepEqual(readdirSync(parent), []);
   }
 });
 

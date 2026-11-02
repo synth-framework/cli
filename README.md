@@ -97,7 +97,7 @@ dependencies. From this checkout:
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-npm test
+(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY && npm test)
 ```
 
 The test builds the CLI, packs it locally, copies `fixtures/adoption-project`
@@ -107,10 +107,16 @@ installed executable. No package is published. The fixture has its own project
 configuration and does not import SYNTH internals.
 
 The resolved temporary directory must be outside the checkout and have no
-`.git` marker in its ancestors; otherwise setup fails before packaging. If
-necessary, choose a safe `TMPDIR` and rerun the tests. On macOS and Linux, the
-nonblocking-input regression uses the POSIX `mkfifo` utility and reports a skip
-when it is unavailable; a skipped regression is not a verified result.
+`.git` marker or likely Git-directory layout (`HEAD` with `objects` and `refs`,
+or with `commondir`) in its ancestors; otherwise setup fails before packaging.
+This conservative filesystem check is not a general Git repository detector.
+The test also requires `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and
+`GIT_OBJECT_DIRECTORY` to be unset, including empty values, because they can
+alter Git discovery. The subshell above unsets them for the test without
+changing your shell. If necessary, choose a safe `TMPDIR` and rerun the tests.
+On macOS and Linux, the nonblocking-input regression uses the POSIX `mkfifo`
+utility and reports a skip when it is unavailable; a skipped regression is not
+a verified result.
 
 ### Exact macOS validation procedure
 
@@ -120,7 +126,7 @@ On a macOS machine with this checkout and Node.js 22 or newer, run:
 uname -s                # Must print Darwin for a macOS result.
 node --version          # Must be v22 or newer.
 npm ci --ignore-scripts --no-audit --no-fund
-npm test
+(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY && npm test)
 ```
 
 `npm ci` may need network access to obtain the development dependencies. The
@@ -131,8 +137,10 @@ A separate remote workspace/container should likewise be reported as tested
 only after the procedure is run there.
 
 For an interactive fixture walkthrough from the repository root, first choose a
-`TMPDIR` outside the checkout and without a `.git` ancestor. Unlike the test
-setup, these manual commands do not enforce that isolation:
+`TMPDIR` outside the checkout and outside Git repository ancestors, and run in a
+shell where `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and
+`GIT_OBJECT_DIRECTORY` are unset. Unlike the test setup, these manual commands
+do not enforce those conditions:
 
 ```sh
 npm run build
