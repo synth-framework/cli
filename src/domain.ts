@@ -1,4 +1,6 @@
 import { SynthError, usageError } from './errors.js';
+import { fileFreshness, type Freshness } from './fingerprint.js';
+import { upgradeRecord, validateVerification, type Check, type Evidence, type EvidenceView, type Evaluation, type Verdict } from './verification.js';
 
 export const KIND_PREFIX = {
   outcome: 'O',
@@ -28,12 +30,24 @@ export interface Entry {
   createdAt: string;
 }
 
-export interface WorkRecord {
-  schemaVersion: 1;
+interface RecordBase {
   originalIntention: string;
   createdAt: string;
   entries: Entry[];
 }
+
+export interface WorkRecordV1 extends RecordBase {
+  schemaVersion: 1;
+}
+
+export interface WorkRecordV2 extends RecordBase {
+  schemaVersion: 2;
+  checks: Check[];
+  evidence: Evidence[];
+  evaluations: Evaluation[];
+}
+
+export type WorkRecord = WorkRecordV1 | WorkRecordV2;
 
 export interface EntryInput {
   kind: EntryKind;
@@ -97,22 +111,24 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
   }
   if (!isObject(value)) return corrupt('expected an object');
   if (!Number.isInteger(value.schemaVersion)) return corrupt('missing or invalid schemaVersion');
-  if (value.schemaVersion !== 1) {
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) {
     throw new SynthError(
       'UNSUPPORTED_SCHEMA',
-      `Work record "${location}" has schema version ${String(value.schemaVersion)}; this CLI supports version 1. It was not changed.`,
+      `Work record "${location}" has schema version ${String(value.schemaVersion)}; this CLI supports versions 1 and 2. It was not changed.`,
       3,
     );
   }
-  if (!hasOnlyKeys(value, ['schemaVersion', 'originalIntention', 'createdAt', 'entries'])) {
-    return corrupt('unrecognized record fields');
-  }
+  const recordKeys = value.schemaVersion === 1
+    ? ['schemaVersion', 'originalIntention', 'createdAt', 'entries']
+    : ['schemaVersion', 'originalIntention', 'createdAt', 'entries', 'checks', 'evidence', 'evaluations'];
+  if (!hasOnlyKeys(value, recordKeys)) return corrupt('unrecognized record fields');
   if (!isNonblank(value.originalIntention)) return corrupt('missing original intention');
   if (!isTimestamp(value.createdAt)) return corrupt('invalid creation time');
   if (!Array.isArray(value.entries)) return corrupt('entries must be an array');
 
   const ids = new Set<string>();
   const questions = new Set<string>();
+  const criteria = new Set<string>();
   const answerTargets: string[] = [];
   for (const item of value.entries) {
     if (!isObject(item)) return corrupt('an entry is not an object');
@@ -132,18 +148,23 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     }
     ids.add(item.id);
     if (item.kind === 'question') questions.add(item.id);
+    if (item.kind === 'criterion') criteria.add(item.id);
   }
   if (answerTargets.some((id) => !questions.has(id))) return corrupt('answer refers to a missing question');
+  if (value.schemaVersion === 2) validateVerification(value, criteria, corrupt);
   return value as unknown as WorkRecord;
 }
 
 export function newRecord(intention: unknown): WorkRecord {
   if (!isNonblank(intention)) throw usageError('Provide a non-empty intention with --intent.');
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     originalIntention: intention,
     createdAt: new Date().toISOString(),
     entries: [],
+    checks: [],
+    evidence: [],
+    evaluations: [],
   };
 }
 
@@ -208,7 +229,7 @@ export function appendEntries(record: WorkRecord, inputs: EntryInput[]): { recor
     if (entry.kind === 'question') questions.add(entry.id);
     added.push(entry);
   }
-  return { record: { ...record, entries: [...record.entries, ...added] }, added };
+  return { record: { ...upgradeRecord(record), entries: [...record.entries, ...added] }, added };
 }
 
 export interface QuestionView extends Entry {
@@ -217,11 +238,15 @@ export interface QuestionView extends Entry {
 }
 
 export interface CriterionView extends Entry {
-  evaluation: 'unverified';
+  evaluation: Verdict;
+  evaluationId: string | null;
+  evaluationReason: string | null;
+  evidenceIds: string[];
+  freshness: Freshness;
 }
 
 export interface Handoff {
-  recordVersion: 1;
+  recordVersion: 1 | 2;
   originalIntention: string;
   createdAt: string;
   outcomes: Entry[];
@@ -237,10 +262,14 @@ export interface Handoff {
   decisions: Entry[];
   gaps: Entry[];
   nextActions: Entry[];
+  checks: Check[];
+  evidence: EvidenceView[];
+  evaluations: Evaluation[];
   missingContext: string[];
   capabilities: {
-    evidence: 'not_available';
-    evaluation: 'not_available';
+    checks: 'available';
+    evidence: 'available';
+    evaluation: 'available';
     acceptance: 'not_available';
     questionResolution: 'not_available';
     gapAndActionResolution: 'not_available';
@@ -254,7 +283,24 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const scope = select('scope');
   const constraints = select('constraint');
   const nonGoals = select('non-goal');
-  const criteria: CriterionView[] = select('criterion').map((entry) => ({ ...entry, evaluation: 'unverified' }));
+  const checks = record.schemaVersion === 2 ? record.checks : [];
+  const evaluations = record.schemaVersion === 2 ? record.evaluations : [];
+  const evidence: EvidenceView[] = (record.schemaVersion === 2 ? record.evidence : []).map((item) => ({
+    ...item,
+    freshness: fileFreshness(item.subjectFile),
+    evaluatedFor: [...new Set(evaluations.filter((evaluation) => evaluation.evidenceIds.includes(item.id)).map((evaluation) => evaluation.criterionId))],
+  }));
+  const criteria: CriterionView[] = select('criterion').map((entry) => {
+    const latest = evaluations.filter((item) => item.criterionId === entry.id).at(-1);
+    const evidenceIds = latest?.evidenceIds ?? [];
+    const freshnesses = evidenceIds.map((id) => evidence.find((item) => item.id === id)!.freshness);
+    const freshness: Freshness = freshnesses.includes('changed') ? 'changed'
+      : freshnesses.length > 0 && freshnesses.every((state) => state === 'matching') ? 'matching' : 'unknown';
+    return {
+      ...entry, evaluation: latest?.verdict ?? 'unverified', evaluationId: latest?.id ?? null,
+      evaluationReason: latest?.rationale ?? null, evidenceIds, freshness,
+    };
+  });
   const answers = select('answer');
   const questions: QuestionView[] = select('question').map((entry) => {
     const matching = answers.filter((answer) => answer.questionId === entry.id);
@@ -283,7 +329,7 @@ export function makeHandoff(record: WorkRecord): Handoff {
     ['nextActions', nextActions],
   ];
   return {
-    recordVersion: 1,
+    recordVersion: record.schemaVersion,
     originalIntention: record.originalIntention,
     createdAt: record.createdAt,
     outcomes,
@@ -299,10 +345,14 @@ export function makeHandoff(record: WorkRecord): Handoff {
     decisions,
     gaps,
     nextActions,
+    checks,
+    evidence,
+    evaluations,
     missingContext: groups.filter(([, entries]) => entries.length === 0).map(([name]) => name),
     capabilities: {
-      evidence: 'not_available',
-      evaluation: 'not_available',
+      checks: 'available',
+      evidence: 'available',
+      evaluation: 'available',
       acceptance: 'not_available',
       questionResolution: 'not_available',
       gapAndActionResolution: 'not_available',

@@ -139,6 +139,13 @@ function withLock<T>(location: string, operation: () => T): T {
 
 /** Write in the target directory so replacement is atomic on supported local filesystems. */
 function writeAtomic(location: string, record: WorkRecord, createOnly: boolean): void {
+  let contents: string;
+  try {
+    contents = `${JSON.stringify(record, null, 2)}\n`;
+    decodeRecord(Buffer.from(contents, 'utf8'), location);
+  } catch {
+    throw new SynthError('INTERNAL_ERROR', 'Refusing to save invalid generated state; the existing record was not changed.', 1);
+  }
   const temporary = join(dirname(location), `.${basename(location)}.${randomUUID()}.tmp`);
   let descriptor: number | undefined;
   let temporaryExists = false;
@@ -147,7 +154,7 @@ function writeAtomic(location: string, record: WorkRecord, createOnly: boolean):
   try {
     descriptor = openSync(temporary, 'wx', 0o600);
     temporaryExists = true;
-    writeFileSync(descriptor, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+    writeFileSync(descriptor, contents, 'utf8');
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
