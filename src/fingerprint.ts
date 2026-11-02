@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { hasErrorCode } from './errors.js';
 
 const MAX_SUBJECT_BYTES = 8 * 1024 * 1024;
@@ -15,6 +15,20 @@ export interface FileSnapshot {
 }
 
 export type Freshness = 'matching' | 'changed' | 'unknown';
+
+export function isFileSnapshot(value: unknown): value is FileSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const snapshot = value as Record<string, unknown>;
+  const expected = ['path', 'algorithm', 'digest', 'state', 'reason', 'capturedAt'];
+  if (Object.keys(snapshot).length !== expected.length || !Object.keys(snapshot).every((key) => expected.includes(key))) return false;
+  if (typeof snapshot.path !== 'string' || !isAbsolute(snapshot.path) || snapshot.algorithm !== 'sha256') return false;
+  if (typeof snapshot.capturedAt !== 'string') return false;
+  const time = Date.parse(snapshot.capturedAt);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== snapshot.capturedAt) return false;
+  if (snapshot.state === 'captured') return typeof snapshot.digest === 'string' && /^[0-9a-f]{64}$/.test(snapshot.digest) && snapshot.reason === null;
+  return (snapshot.state === 'missing' || snapshot.state === 'unavailable') && snapshot.digest === null &&
+    typeof snapshot.reason === 'string' && snapshot.reason.trim().length > 0;
+}
 
 /** Hash only a user-selected regular file, without following a final symlink. */
 export function snapshotFile(inputPath: string): FileSnapshot {

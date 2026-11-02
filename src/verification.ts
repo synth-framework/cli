@@ -1,7 +1,8 @@
 import { isAbsolute } from 'node:path';
-import type { WorkRecord, WorkRecordV2 } from './domain.js';
+import type { WorkRecord, WorkRecordV3 } from './domain.js';
+import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
-import type { FileSnapshot, Freshness } from './fingerprint.js';
+import { isFileSnapshot, type FileSnapshot, type Freshness } from './fingerprint.js';
 
 export const OUTPUT_LIMIT_BYTES = 16 * 1024;
 export const MAX_TIMEOUT_MS = 300_000;
@@ -70,9 +71,25 @@ export interface Evaluation {
   createdAt: string;
 }
 
+export interface CheckView extends Check {
+  criterionContexts: CriterionContextView[];
+}
+
+export interface CriterionContextView {
+  criterionId: string;
+  recordedRevisionId: string | null;
+  currentRevisionId: string | null;
+  state: 'current' | 'changed' | 'inactive';
+}
+
 export interface EvidenceView extends Evidence {
   freshness: Freshness;
   evaluatedFor: string[];
+  criterionContexts: CriterionContextView[];
+}
+
+export interface EvaluationView extends Evaluation {
+  criterionContext: CriterionContextView;
 }
 
 export interface CheckInput {
@@ -133,13 +150,6 @@ function references(value: unknown, allowed: Set<string>, required: boolean): va
   return Array.isArray(value) && (!required || value.length > 0) && value.length <= 100 &&
     value.every((id) => typeof id === 'string' && allowed.has(id)) && new Set(value).size === value.length;
 }
-function validSnapshot(value: unknown): boolean {
-  if (value === null) return true;
-  if (!object(value) || !keys(value, ['path', 'algorithm', 'digest', 'state', 'reason', 'capturedAt'])) return false;
-  if (!nonblank(value.path) || !isAbsolute(value.path) || value.algorithm !== 'sha256' || !timestamp(value.capturedAt)) return false;
-  if (value.state === 'captured') return typeof value.digest === 'string' && /^[0-9a-f]{64}$/.test(value.digest) && value.reason === null;
-  return (value.state === 'missing' || value.state === 'unavailable') && value.digest === null && nonblank(value.reason);
-}
 function validStream(value: unknown, captured: boolean): boolean {
   if (!object(value) || !keys(value, ['bytes', 'text', 'truncated'])) return false;
   if (!Number.isSafeInteger(value.bytes) || (value.bytes as number) < 0 || typeof value.truncated !== 'boolean') return false;
@@ -192,7 +202,7 @@ export function validateVerification(value: Record<string, unknown>, criterionId
   for (const raw of value.evidence as unknown[]) {
     if (!object(raw) || !keys(raw, ['id', 'summary', 'source', 'subject', 'revision', 'artifact', 'limitations', 'criterionIds', 'checkId', 'subjectFile', 'createdAt'])) corrupt('invalid evidence fields');
     if (!validId(raw.id, 'E') || evidence.has(raw.id)) corrupt('invalid or duplicate evidence ID');
-    if (!nonblank(raw.summary) || !nonblank(raw.source) || !nonblank(raw.subject) || !nonblank(raw.limitations) || !optionalText(raw.revision) || !optionalText(raw.artifact) || !references(raw.criterionIds, criterionIds, false) || !timestamp(raw.createdAt) || !validSnapshot(raw.subjectFile)) corrupt('invalid evidence');
+    if (!nonblank(raw.summary) || !nonblank(raw.source) || !nonblank(raw.subject) || !nonblank(raw.limitations) || !optionalText(raw.revision) || !optionalText(raw.artifact) || !references(raw.criterionIds, criterionIds, false) || !timestamp(raw.createdAt) || !(raw.subjectFile === null || isFileSnapshot(raw.subjectFile))) corrupt('invalid evidence');
     if (raw.checkId !== null && (typeof raw.checkId !== 'string' || !checks.has(raw.checkId))) {
       corrupt('evidence refers to a missing check');
     }
@@ -208,11 +218,6 @@ export function validateVerification(value: Record<string, unknown>, criterionId
   }
 }
 
-export function upgradeRecord(record: WorkRecord): WorkRecordV2 {
-  if (record.schemaVersion === 2) return record;
-  return { ...record, schemaVersion: 2, checks: [], evidence: [], evaluations: [] };
-}
-
 function nextId(prefix: string, items: readonly { id: string }[]): string {
   let max = 0;
   for (const item of items) max = Math.max(max, Number(item.id.slice(prefix.length)));
@@ -225,7 +230,7 @@ function requireCriteria(record: WorkRecord, ids: string[], required = false): v
   if (!references(ids, known, required)) throw usageError('Criterion IDs must be distinct existing IDs (at most 100).');
 }
 
-export function addCheck(record: WorkRecord, input: CheckInput, reported?: { status: 'skipped' | 'inconclusive'; reason: string }): { record: WorkRecordV2; check: Check } {
+export function addCheck(record: WorkRecord, input: CheckInput, reported?: { status: 'skipped' | 'inconclusive'; reason: string }): { record: WorkRecordV3; check: Check } {
   requireCriteria(record, input.criterionIds);
   const next = upgradeRecord(record);
   const check: Check = {
@@ -236,10 +241,11 @@ export function addCheck(record: WorkRecord, input: CheckInput, reported?: { sta
     timeoutMs: reported ? null : input.timeoutMs, captureOutput: reported ? false : input.captureOutput,
     outputRef: input.outputRef, output: null,
   };
-  return { record: { ...next, checks: [...next.checks, check] }, check };
+  const context = { checkId: check.id, entryCount: next.entries.length, revisionCount: next.revisions.length };
+  return { record: { ...next, checks: [...next.checks, check], checkContexts: [...next.checkContexts, context] }, check };
 }
 
-export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV2 {
+export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV3 {
   const next = upgradeRecord(record);
   const index = next.checks.findIndex((check) => check.id === completed.id);
   if (index < 0 || next.checks[index]!.status !== 'pending') throw usageError(`Check ${completed.id} is missing or is no longer pending; inspect the record.`);
@@ -248,21 +254,23 @@ export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV
   return { ...next, checks };
 }
 
-export function addEvidence(record: WorkRecord, input: EvidenceInput): { record: WorkRecordV2; evidence: Evidence } {
+export function addEvidence(record: WorkRecord, input: EvidenceInput): { record: WorkRecordV3; evidence: Evidence } {
   requireCriteria(record, input.criterionIds);
   const next = upgradeRecord(record);
   if (input.checkId !== null && !next.checks.some((item) => item.id === input.checkId)) {
     throw usageError(`Check ${input.checkId} is not in this work record.`);
   }
   const evidence: Evidence = { id: nextId('E', next.evidence), ...input, createdAt: new Date().toISOString() };
-  return { record: { ...next, evidence: [...next.evidence, evidence] }, evidence };
+  const context = { evidenceId: evidence.id, entryCount: next.entries.length, revisionCount: next.revisions.length };
+  return { record: { ...next, evidence: [...next.evidence, evidence], evidenceContexts: [...next.evidenceContexts, context] }, evidence };
 }
 
-export function addEvaluation(record: WorkRecord, input: EvaluationInput): { record: WorkRecordV2; evaluation: Evaluation } {
+export function addEvaluation(record: WorkRecord, input: EvaluationInput): { record: WorkRecordV3; evaluation: Evaluation } {
   requireCriteria(record, [input.criterionId], true);
   const next = upgradeRecord(record);
   const known = new Set(next.evidence.map((item) => item.id));
   if (!references(input.evidenceIds, known, input.verdict !== 'unverified')) throw usageError('A non-unverified evaluation needs distinct existing --evidence IDs (at most 100).');
   const evaluation: Evaluation = { id: nextId('V', next.evaluations), ...input, createdAt: new Date().toISOString() };
-  return { record: { ...next, evaluations: [...next.evaluations, evaluation] }, evaluation };
+  const context = { evaluationId: evaluation.id, entryCount: next.entries.length, revisionCount: next.revisions.length };
+  return { record: { ...next, evaluations: [...next.evaluations, evaluation], evaluationContexts: [...next.evaluationContexts, context] }, evaluation };
 }

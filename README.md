@@ -2,9 +2,10 @@
 
 SYNTH is an agent-first CLI for keeping a bounded work intention and its
 context available to a developer and coding agent. It captures and resumes
-work, runs explicitly selected checks, and records attributed evidence and
-criterion evaluations. It does **not** record review or acceptance. A check,
-evidence item, evaluation, and acceptance are different things.
+work, runs explicitly selected checks, records attributed evidence and criterion
+evaluations, and compares optional baselines. It does **not** record formal
+review findings or acceptance. A check, evidence item, evaluation, drift
+assessment, and acceptance are different things.
 
 The CLI targets Node.js 22+ on macOS and Linux, including agent workspaces.
 Platform targets are not a claim that a particular environment was tested.
@@ -35,11 +36,12 @@ are recorded responses, not proof they are correct or that a question is
 resolved; additional answers are retained. A missing entry is shown as
 **not recorded**, not as proof that it is unnecessary.
 
-Context entries are append-only: plans and decisions are not automatically
-superseded, and gaps and next actions are not automatically marked resolved or
-complete. To communicate a change, add a work `update` that explicitly refers to
-the relevant IDs. These updates are recorded statements, not verification; a
-reader must interpret them alongside the earlier entries.
+Context entries and revisions are append-only. An explicit revision can change
+the current intention, outcome, scope, constraint, non-goal, criterion, or
+verification note while retaining the original and revision history. Plans and
+decisions are not automatically superseded, and gaps and next actions are not
+automatically marked resolved or complete. A work `update` can refer to earlier
+IDs; it is a recorded statement, not verification.
 
 Agents can add several entries in one atomic operation instead of invoking the
 CLI for each fact:
@@ -114,6 +116,72 @@ adequacy, or assess semantic drift. Missing/unreadable/oversized files or no
 snapshot can leave freshness unknown. A missing file after a captured snapshot
 is shown as changed. Revision labels and artifact references are not verified.
 
+## Baselines and review of change
+
+A baseline is optional: work, checks, evidence, evaluations, and revisions do
+not require one. These commands continue the Tiny Notes example above:
+
+```sh
+synth add scope --text 'Title normalization' --json
+synth add verification --text 'Review the title tests' --json
+synth baseline capture --file test/title.test.js --reason 'Record the current working context' --json
+synth revise C1 --text 'Title output is a string' --reason 'Example scope change' --evidence E1 --json
+synth baseline compare B1 --json
+synth baseline assess B1 --area criteria --finding uncertain --reason 'Check whether the revised criterion meets intent' --evidence E1 --json
+synth baseline capture --reason 'Record the changed working context' --json
+synth baseline compare B1 --to B2 --json
+synth handoff --json
+```
+
+`revise` changes `intention` or a recorded outcome, scope, constraint,
+non-goal, criterion, or verification ID. Use `--remove` instead of `--text` to
+remove a recorded entry from the current baseline; the intention cannot be
+removed. A later `--text` restores an entry. `--reason` and `--evidence` are
+optional, and missing reasons are shown. If a reason becomes known later, add a
+work `update` that names the revision ID: that is a plain note, not an automatic
+structured link. A revision is a caller-reported change, not an authorization.
+
+Checks retain the criterion versions linked at **request** time, evidence at
+recording time, and evaluations at assessment time. When a criterion is
+revised, an evaluation of an earlier version remains in history but is not
+applied to the new version; the new version remains unverified until explicitly
+evaluated. This also applies when an entry is removed or restored. Earlier
+checks and evidence are retained, and their version context is separate from
+file freshness and from any assessment of relevance or adequacy.
+
+`baseline capture` snapshots the recorded current intention, scope (including
+outcomes, constraints, and non-goals), criteria, verification notes, and up to
+20 explicitly selected files. Each file is fingerprinted with the same 8 MiB
+regular-file limit used for evidence; its absolute path and hash are stored.
+Relative file paths are resolved from the CLI's working directory, even when
+`--record` selects a record elsewhere. Omitting `--file` on a later capture
+retains the previous selected paths and captures them again. Supplying one or
+more `--file` options replaces the selection; `--no-files` explicitly clears it.
+Missing or unreadable snapshots remain unknown. Files are read one at a time, not as an atomic project snapshot;
+other processes can change them during or between captures. The baseline is not
+a whole-project snapshot: unselected files, check inputs, unrecorded work, and
+semantic meaning are not inferred.
+
+`baseline compare B1` compares B1 with the current recorded state and current
+bytes of B1's selected files; `--to B2` compares the two saved snapshots,
+including added or removed file selections. The handoff shows the latest
+baseline's current comparison and the last baseline-to-baseline transition;
+earlier comparisons remain available explicitly. Comparisons show recorded
+text, additions, removals, revisions and reasons, and selected file changes.
+An area can contain both known changes and unknown files; the unknown count
+remains visible. An unchanged result is not evidence that the work or
+verification is adequate. Evidence IDs shown as candidates are based on
+recorded links or unknown check inputs; SYNTH does **not** determine which
+evidence is actually affected.
+
+`baseline assess` records a caller's reasoned assessment for one area against
+a chosen baseline; it is not a formal review finding or acceptance, and the
+caller is not authenticated. The handoff reports whether that **area's recorded
+text and selected files** have changed since the assessment and lists evidence
+added since then. This is not a freshness guarantee for the assessment as a
+whole: other areas, evidence relevance, and untracked inputs may also matter.
+Capturing a new baseline does not erase earlier changes or assessments.
+
 ## JSON and errors
 
 With `--json`, a successful command writes one JSON object to stdout:
@@ -128,13 +196,16 @@ check, SYNTH records the result when possible and exits 130 for SIGINT or 143
 for SIGTERM. Arguments after `--` belong to the selected command, including any
 `--json` argument there.
 
-The envelope remains output version 1; Slice 2 adds fields and expands criterion
-evaluation values. Consumers should inspect `outputVersion` and tolerate added
-fields. Record schema 1 is read without modification; the first successful
-write upgrades it atomically to schema 2, retaining existing entries and adding
-the previously absent check/evidence/evaluation collections. Older Slice 1
-binaries cannot read schema 2. Unsupported schemas and corrupt records remain
-untouched; keep a backup if backward compatibility is needed.
+The envelope remains output version 1; newer slices add fields. Consumers
+should inspect `outputVersion` and tolerate added fields. Record schemas 1 and 2
+are read without modification; the first successful mutation upgrades them
+atomically to schema 3, retaining existing context, checks, evidence, and
+evaluations. Because schema 2 did not support criterion revisions, its existing
+checks, evidence, and evaluations are associated with the original criterion
+versions on upgrade; no check inputs are inferred. Older Slice 1 and Slice 2
+binaries reject schema 3 rather than dropping its fields. Unsupported schemas
+and corrupt records remain untouched; keep a backup if backward compatibility
+is needed.
 
 ## Local storage and recovery
 
@@ -158,10 +229,12 @@ lock is a hint, not proof that it is stale. If an error occurs after replacement
 the record may already have been saved: inspect it before retrying.
 
 This scheme does not coordinate direct edits, different aliases to the same
-path, or uncooperative writers; it is not a distributed lock. Record-file
-symlinks are rejected. Network filesystems are not validated. File contents
-are fsynced, but directory metadata is not, so atomic replacement is not a
-backup or a guarantee against power loss.
+path, or uncooperative writers; it is not a distributed lock. Baselines refer
+to append-only entry and revision prefixes, so directly editing historical data
+can also alter what a baseline represents. This is not tamper-proof history.
+Record-file symlinks are rejected. Network filesystems are not validated. File
+contents are fsynced, but directory metadata is not, so atomic replacement is
+not a backup or a guarantee against power loss.
 
 ## Development and installed-package tests
 

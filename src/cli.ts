@@ -2,9 +2,11 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput } from './domain.js';
+import { addDriftAssessment, addRevision, captureBaseline, compareBaselines, type BaselineArea, type DriftFinding } from './baseline.js';
+import { upgradeRecord } from './evolution.js';
 import { SynthError, usageError } from './errors.js';
 import { snapshotFile } from './fingerprint.js';
-import { HELP, renderAdded, renderHandoff, renderStatus } from './presentation.js';
+import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
 import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Verdict } from './verification.js';
@@ -78,6 +80,8 @@ async function main(argv: string[]): Promise<void> {
           status: { type: 'string' }, summary: { type: 'string' }, source: { type: 'string' },
           subject: { type: 'string' }, limitations: { type: 'string' }, artifact: { type: 'string' },
           check: { type: 'string' }, 'subject-file': { type: 'string' },
+          remove: { type: 'boolean' }, file: { type: 'string', multiple: true }, 'no-files': { type: 'boolean' },
+          to: { type: 'string' }, area: { type: 'string' }, finding: { type: 'string' },
         },
       });
     } catch (error) {
@@ -89,7 +93,7 @@ async function main(argv: string[]): Promise<void> {
     const usedOptions = new Set<string>();
     for (const token of tokens ?? []) {
       if (token.kind !== 'option') continue;
-      if (usedOptions.has(token.name) && token.name !== 'criterion' && token.name !== 'evidence') {
+      if (usedOptions.has(token.name) && token.name !== 'criterion' && token.name !== 'evidence' && token.name !== 'file') {
         throw usageError(`Option --${token.name} was supplied more than once.`);
       }
       usedOptions.add(token.name);
@@ -117,6 +121,8 @@ async function main(argv: string[]): Promise<void> {
       check: ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'status', 'reason'],
       evidence: ['record', 'json', 'criterion', 'summary', 'source', 'subject', 'revision', 'artifact', 'limitations', 'check', 'subject-file'],
       evaluate: ['record', 'json', 'status', 'reason', 'evidence'],
+      revise: ['record', 'json', 'text', 'remove', 'reason', 'evidence'],
+      baseline: ['record', 'json', 'reason', 'file', 'no-files', 'to', 'area', 'finding', 'evidence'],
     };
     const commandOptions = Object.hasOwn(allowed, command) ? allowed[command] : undefined;
     if (commandOptions === undefined) throw usageError(`Unknown command "${command}". Run synth --help for usage.`);
@@ -153,6 +159,59 @@ async function main(argv: string[]): Promise<void> {
         return { record: next.record, result: next.added };
       });
       writeSuccess(command, { recordPath: location, entries: added }, renderAdded(added));
+      return;
+    }
+    if (command === 'revise') {
+      if (positionals.length !== 2) throw usageError('Use revise <intention-or-entry-id> with --text or --remove.');
+      const remove = values.remove === true;
+      if ((values.text === undefined) === !remove) throw usageError('Choose exactly one of --text or --remove.');
+      const input = {
+        target: positionals[1]!, text: remove ? null : requiredText(values.text, '--text'),
+        reason: optionalText(values.reason, '--reason'), evidenceIds: stringList(values.evidence),
+      };
+      const revision = updateRecord(location, (record) => {
+        const next = addRevision(record, input);
+        return { record: next.record, result: next.revision };
+      });
+      writeSuccess(command, { recordPath: location, revision }, `Recorded revision ${revision.id} for ${revision.target}; earlier versions remain in history.`);
+      return;
+    }
+    if (command === 'baseline') {
+      const mode = positionals[1];
+      if (!mode || !['capture', 'compare', 'assess'].includes(mode)) throw usageError('Use baseline capture, baseline compare, or baseline assess.');
+      const modeOptions = mode === 'capture' ? ['record', 'json', 'reason', 'file', 'no-files']
+        : mode === 'compare' ? ['record', 'json', 'to'] : ['record', 'json', 'area', 'finding', 'reason', 'evidence'];
+      for (const option of usedOptions) if (!modeOptions.includes(option)) throw usageError(`Option --${option} is not valid for baseline ${mode}.`);
+      if (mode === 'capture') {
+        if (positionals.length !== 2) throw usageError('Use baseline capture with optional selected files and reason.');
+        if (values['no-files'] === true && usedOptions.has('file')) throw usageError('Use --file or --no-files, not both.');
+        const files = values['no-files'] === true ? [] : usedOptions.has('file')
+          ? stringList(values.file).map((file) => resolve(requiredText(file, '--file'))) : null;
+        const baseline = updateRecord(location, (record) => {
+          const next = captureBaseline(record, { reason: optionalText(values.reason, '--reason'), files });
+          return { record: next.record, result: next.baseline };
+        });
+        writeSuccess(command, { recordPath: location, baseline }, `Captured baseline ${baseline.id}; it is not an acceptance or a semantic drift judgment.`);
+        return;
+      }
+      if (positionals.length !== 3) throw usageError(`Use baseline ${mode} <baseline-id>.`);
+      const baselineId = positionals[2]!;
+      if (mode === 'compare') {
+        const comparison = compareBaselines(upgradeRecord(readRecord(location)), baselineId, optionalText(values.to, '--to') ?? undefined);
+        writeSuccess(command, { recordPath: location, comparison }, renderComparison(comparison));
+        return;
+      }
+      if (typeof values.area !== 'string' || !['intention', 'scope', 'criteria', 'verification'].includes(values.area)) throw usageError('--area must be intention, scope, criteria, or verification.');
+      if (typeof values.finding !== 'string' || !['intentional', 'unintended', 'uncertain', 'no_concern'].includes(values.finding)) throw usageError('--finding must be intentional, unintended, uncertain, or no_concern.');
+      const input = {
+        baselineId, area: values.area as BaselineArea, finding: values.finding as DriftFinding,
+        reason: requiredText(values.reason, '--reason'), evidenceIds: stringList(values.evidence),
+      };
+      const assessment = updateRecord(location, (record) => {
+        const next = addDriftAssessment(record, input);
+        return { record: next.record, result: next.assessment };
+      });
+      writeSuccess(command, { recordPath: location, assessment }, `Recorded drift assessment ${assessment.id}; it is a caller's assessment, not acceptance.`);
       return;
     }
     if (command === 'check') {
