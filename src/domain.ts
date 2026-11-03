@@ -295,6 +295,7 @@ export function appendEntries(record: WorkRecord, inputs: EntryInput[]): { recor
     };
     numbers.set(input.kind, number);
     if (entry.kind === 'question') questions.add(entry.id);
+    if (entry.kind === 'criterion') criteria.add(entry.id);
     added.push(entry);
   }
   const next = upgradeRecord(record);
