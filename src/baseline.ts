@@ -1,14 +1,15 @@
-import type { Entry, EntryKind, WorkRecord, WorkRecordV3 } from './domain.js';
+import type { Entry, EntryKind, WorkRecord, WorkRecordV4 } from './domain.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, snapshotFile, type FileSnapshot } from './fingerprint.js';
+import { keys, nextId, nonblank, object, optionalText, references, timestamp, validCount, validId } from './validate.js';
 
 export const MAX_BASELINE_FILES = 20;
 export type BaselineArea = 'intention' | 'scope' | 'criteria' | 'verification';
 export type DriftFinding = 'intentional' | 'unintended' | 'uncertain' | 'no_concern';
 
 const scopeKinds: readonly EntryKind[] = ['outcome', 'scope', 'constraint', 'non-goal'];
-const revisableKinds: readonly EntryKind[] = [...scopeKinds, 'criterion', 'verification'];
+const revisableKinds: readonly EntryKind[] = [...scopeKinds, 'criterion', 'verification', 'claim'];
 
 export interface Revision {
   id: string;
@@ -124,42 +125,9 @@ export interface DriftAssessmentView extends DriftAssessment {
   evidenceAddedSince: string[];
 }
 
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  return Object.keys(value).length === expected.length && Object.keys(value).every((key) => expected.includes(key));
-}
-function nonblank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-function optionalText(value: unknown): value is string | null { return value === null || nonblank(value); }
-function timestamp(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const time = Date.parse(value);
-  return Number.isFinite(time) && new Date(time).toISOString() === value;
-}
-function validId(value: unknown, prefix: string): value is string {
-  if (typeof value !== 'string' || !value.startsWith(prefix)) return false;
-  const suffix = value.slice(prefix.length);
-  return /^[1-9][0-9]*$/.test(suffix) && Number.isSafeInteger(Number(suffix));
-}
-function validCount(value: unknown, maximum: number): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
-}
-function references(value: unknown, allowed: Set<string>): value is string[] {
-  return Array.isArray(value) && value.length <= 100 && value.every((id) => typeof id === 'string' && allowed.has(id)) &&
-    new Set(value).size === value.length;
-}
 function filesValid(value: unknown): value is FileSnapshot[] {
   return Array.isArray(value) && value.length <= MAX_BASELINE_FILES && value.every(isFileSnapshot) &&
     new Set(value.map((item) => item.path)).size === value.length;
-}
-function nextId(prefix: string, items: readonly { id: string }[]): string {
-  let max = 0;
-  for (const item of items) max = Math.max(max, Number(item.id.slice(prefix.length)));
-  if (!Number.isSafeInteger(max + 1)) throw usageError(`No more ${prefix} IDs are available.`);
-  return `${prefix}${max + 1}`;
 }
 
 /** Validate the history and all its references before any record can be rewritten. */
@@ -167,9 +135,9 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   if (!Array.isArray(value.revisions) || !Array.isArray(value.baselines) || !Array.isArray(value.driftAssessments) ||
       !Array.isArray(value.checkContexts) || !Array.isArray(value.evidenceContexts) || !Array.isArray(value.evaluationContexts)) corrupt('baseline history and contexts must be arrays');
   const entries = value.entries as Entry[];
-  const checks = value.checks as WorkRecordV3['checks'];
-  const evidence = value.evidence as WorkRecordV3['evidence'];
-  const evaluations = value.evaluations as WorkRecordV3['evaluations'];
+  const checks = value.checks as WorkRecordV4['checks'];
+  const evidence = value.evidence as WorkRecordV4['evidence'];
+  const evaluations = value.evaluations as WorkRecordV4['evaluations'];
   const revisions = value.revisions as unknown[];
   const baselines = value.baselines as unknown[];
   const assessments = value.driftAssessments as unknown[];
@@ -197,6 +165,13 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
     // Revision entry counts were checked as nondecreasing above.
     return revisionCount === 0 || (revisions[revisionCount - 1] as Revision).entryCount <= entryCount;
   };
+  // Revision evidence counts were also checked as nondecreasing, so the last
+  // included revision carries the maximum: a baseline or assessment must not
+  // enclose revisions that cite evidence beyond its own evidence prefix.
+  const revisionsCiteIncludedEvidence = (revisionCount: unknown, evidenceCount: unknown): boolean => {
+    if (!validCount(revisionCount, revisions.length) || !validCount(evidenceCount, evidence.length)) return false;
+    return revisionCount === 0 || (revisions[revisionCount - 1] as Revision).evidenceCount <= evidenceCount;
+  };
   const baselineIds = new Set<string>();
   lastEntryCount = 0;
   let lastRevisionCount = 0;
@@ -206,7 +181,8 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   for (const raw of baselines) {
     if (!object(raw) || !keys(raw, ['id', 'reason', 'entryCount', 'revisionCount', 'checkCount', 'evidenceCount', 'evaluationCount', 'files', 'createdAt'])) corrupt('invalid baseline fields');
     if (!validId(raw.id, 'B') || baselineIds.has(raw.id) || !optionalText(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid baseline');
-    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !validCount(raw.checkCount, checks.length) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.evaluationCount, evaluations.length) ||
+    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !revisionsCiteIncludedEvidence(raw.revisionCount, raw.evidenceCount) ||
+        !validCount(raw.checkCount, checks.length) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.evaluationCount, evaluations.length) ||
         (raw.entryCount as number) < lastEntryCount || (raw.revisionCount as number) < lastRevisionCount || (raw.checkCount as number) < lastCheckCount ||
         (raw.evidenceCount as number) < lastEvidenceCount || (raw.evaluationCount as number) < lastEvaluationCount || !filesValid(raw.files)) corrupt('invalid baseline contents');
     baselineIds.add(raw.id as string);
@@ -225,7 +201,8 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
     if (!object(raw) || !keys(raw, ['id', 'baselineId', 'area', 'finding', 'reason', 'evidenceIds', 'entryCount', 'revisionCount', 'evidenceCount', 'baselineCount', 'files', 'createdAt'])) corrupt('invalid drift assessment fields');
     if (!validId(raw.id, 'DA') || assessmentIds.has(raw.id) || !['intention', 'scope', 'criteria', 'verification'].includes(String(raw.area)) ||
         !['intentional', 'unintended', 'uncertain', 'no_concern'].includes(String(raw.finding)) || !nonblank(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid drift assessment');
-    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.baselineCount, baselines.length) ||
+    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !revisionsCiteIncludedEvidence(raw.revisionCount, raw.evidenceCount) ||
+        !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.baselineCount, baselines.length) ||
         (raw.entryCount as number) < lastEntryCount || (raw.revisionCount as number) < lastRevisionCount ||
         (raw.evidenceCount as number) < lastEvidenceCount || (raw.baselineCount as number) < lastBaselineCount) corrupt('invalid drift assessment history counts');
     const baseline = (baselines.slice(0, raw.baselineCount as number) as Baseline[]).find((item) => item.id === raw.baselineId);
@@ -274,7 +251,7 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   }
 }
 
-export function revisionIdAt(record: WorkRecordV3, target: string, revisionCount = record.revisions.length): string | null {
+export function revisionIdAt(record: WorkRecordV4, target: string, revisionCount = record.revisions.length): string | null {
   for (let index = Math.min(revisionCount, record.revisions.length) - 1; index >= 0; index--) {
     const revision = record.revisions[index]!;
     if (revision.target === target) return revision.id;
@@ -295,7 +272,7 @@ export function projectEntry(entry: Entry, revisions: readonly Revision[], count
   return { ...entry, text, originalText: entry.text, active, revisionId };
 }
 
-export function currentIntention(record: WorkRecordV3, count = record.revisions.length): { text: string; revisionId: string | null } {
+export function currentIntention(record: WorkRecordV4, count = record.revisions.length): { text: string; revisionId: string | null } {
   let text = record.originalIntention;
   let revisionId: string | null = null;
   for (const revision of record.revisions.slice(0, count)) {
@@ -304,13 +281,13 @@ export function currentIntention(record: WorkRecordV3, count = record.revisions.
   return { text, revisionId };
 }
 
-export function addRevision(record: WorkRecord, input: { target: string; text: string | null; reason: string | null; evidenceIds: string[] }): { record: WorkRecordV3; revision: Revision } {
+export function addRevision(record: WorkRecord, input: { target: string; text: string | null; reason: string | null; evidenceIds: string[] }): { record: WorkRecordV4; revision: Revision } {
   const next = upgradeRecord(record);
   if (input.target === 'intention') {
     if (input.text === null) throw usageError('The original intention cannot be removed; revise its text instead.');
   } else {
     const target = next.entries.find((entry) => entry.id === input.target);
-    if (!target || !revisableKinds.includes(target.kind)) throw usageError('Revise intention or an existing outcome, scope, constraint, non-goal, criterion, or verification ID.');
+    if (!target || !revisableKinds.includes(target.kind)) throw usageError('Revise intention or an existing outcome, scope, constraint, non-goal, criterion, verification, or claim ID.');
   }
   if (!references(input.evidenceIds, new Set(next.evidence.map((item) => item.id)))) throw usageError('Evidence IDs must be distinct existing IDs (at most 100).');
   const revision: Revision = {
@@ -321,7 +298,7 @@ export function addRevision(record: WorkRecord, input: { target: string; text: s
 }
 
 /** files=null inherits the last explicitly selected paths; [] explicitly clears them. */
-export function captureBaseline(record: WorkRecord, input: { reason: string | null; files: string[] | null }): { record: WorkRecordV3; baseline: Baseline } {
+export function captureBaseline(record: WorkRecord, input: { reason: string | null; files: string[] | null }): { record: WorkRecordV4; baseline: Baseline } {
   const next = upgradeRecord(record);
   const paths = input.files ?? next.baselines.at(-1)?.files.map((item) => item.path) ?? [];
   if (paths.length > MAX_BASELINE_FILES || new Set(paths).size !== paths.length) throw usageError(`Select at most ${MAX_BASELINE_FILES} distinct baseline files.`);
@@ -334,7 +311,7 @@ export function captureBaseline(record: WorkRecord, input: { reason: string | nu
   return { record: { ...next, baselines: [...next.baselines, baseline] }, baseline };
 }
 
-export function addDriftAssessment(record: WorkRecord, input: { baselineId: string; area: BaselineArea; finding: DriftFinding; reason: string; evidenceIds: string[] }): { record: WorkRecordV3; assessment: DriftAssessment } {
+export function addDriftAssessment(record: WorkRecord, input: { baselineId: string; area: BaselineArea; finding: DriftFinding; reason: string; evidenceIds: string[] }): { record: WorkRecordV4; assessment: DriftAssessment } {
   const next = upgradeRecord(record);
   const baseline = next.baselines.find((item) => item.id === input.baselineId);
   if (!baseline) throw usageError(`Baseline ${input.baselineId} is not in this work record.`);
@@ -349,7 +326,7 @@ export function addDriftAssessment(record: WorkRecord, input: { baselineId: stri
   return { record: { ...next, driftAssessments: [...next.driftAssessments, assessment] }, assessment };
 }
 
-function itemsAt(record: WorkRecordV3, area: BaselineArea, entryCount: number, revisionCount: number): SnapshotItem[] {
+function itemsAt(record: WorkRecordV4, area: BaselineArea, entryCount: number, revisionCount: number): SnapshotItem[] {
   if (area === 'intention') {
     const intention = currentIntention(record, revisionCount);
     return [{ id: 'intention', kind: 'intention', ...intention }];
@@ -365,7 +342,7 @@ function belongsToArea(area: BaselineArea, kind: EntryKind): boolean {
     : area === 'verification' ? kind === 'verification' : false;
 }
 
-function compareArea(record: WorkRecordV3, area: BaselineArea, beforeItems: SnapshotItem[], afterItems: SnapshotItem[], beforeFiles: FileSnapshot[], afterFiles: FileSnapshot[], revisions: Revision[], entries: Entry[]): AreaComparison {
+function compareArea(record: WorkRecordV4, area: BaselineArea, beforeItems: SnapshotItem[], afterItems: SnapshotItem[], beforeFiles: FileSnapshot[], afterFiles: FileSnapshot[], revisions: Revision[], entries: Entry[]): AreaComparison {
   const beforeById = new Map(beforeItems.map((item) => [item.id, item]));
   const afterById = new Map(afterItems.map((item) => [item.id, item]));
   const ids = [...new Set([...beforeById.keys(), ...afterById.keys()])];
@@ -429,7 +406,7 @@ function observe(paths: readonly string[], cache: ObservationCache): FileSnapsho
   });
 }
 
-export function compareBaselines(record: WorkRecordV3, baselineId: string, targetId?: string, cache: ObservationCache = new Map()): BaselineComparison {
+export function compareBaselines(record: WorkRecordV4, baselineId: string, targetId?: string, cache: ObservationCache = new Map()): BaselineComparison {
   const before = record.baselines.find((item) => item.id === baselineId);
   if (!before) throw usageError(`Baseline ${baselineId} is not in this work record.`);
   const after = targetId === undefined ? undefined : record.baselines.find((item) => item.id === targetId);
@@ -459,10 +436,13 @@ export function compareBaselines(record: WorkRecordV3, baselineId: string, targe
   };
   const evidenceCount = after ? Math.max(before.evidenceCount, after.evidenceCount) : record.evidence.length;
   const evaluationCount = after ? Math.max(before.evaluationCount, after.evaluationCount) : record.evaluations.length;
+  const checkCount = after ? Math.max(before.checkCount, after.checkCount) : record.checks.length;
   const availableEvidence = record.evidence.slice(0, evidenceCount);
+  const checksById = new Map(record.checks.slice(0, checkCount).map((check) => [check.id, check]));
   for (const revision of revisions) for (const id of revision.evidenceIds) addCandidate(id, 'declared_by_revision');
   for (const item of availableEvidence) {
     if (item.criterionIds.some((id) => changedCriteria.has(id))) addCandidate(item.id, 'criterion_link');
+    if (item.checkId !== null && checksById.get(item.checkId)?.criterionIds.some((id) => changedCriteria.has(id))) addCandidate(item.id, 'check_criterion_link');
     if (item.subjectFile !== null && changedFiles.has(item.subjectFile.path)) addCandidate(item.id, 'selected_subject_file');
     if (item.checkId !== null && ['changed', 'unknown'].includes(areas.verification.state)) addCandidate(item.id, 'check_inputs_unknown');
   }
@@ -478,7 +458,7 @@ export function compareBaselines(record: WorkRecordV3, baselineId: string, targe
   };
 }
 
-export function assessmentView(record: WorkRecordV3, assessment: DriftAssessment, cache: ObservationCache = new Map()): DriftAssessmentView {
+export function assessmentView(record: WorkRecordV4, assessment: DriftAssessment, cache: ObservationCache = new Map()): DriftAssessmentView {
   const baseline = record.baselines.find((item) => item.id === assessment.baselineId)!;
   const files = assessment.area === 'verification' ? observe(baseline.files.map((item) => item.path), cache) : [];
   const revisions = record.revisions.slice(assessment.revisionCount);
