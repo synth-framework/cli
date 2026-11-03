@@ -42,11 +42,14 @@ export function snapshotFile(inputPath: string): FileSnapshot {
     const before = lstatSync(path, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink()) return unavailable('unavailable', 'not a regular file');
     if (before.size > BigInt(MAX_SUBJECT_BYTES)) return unavailable('unavailable', 'file exceeds the 8 MiB fingerprint limit');
-    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // O_NONBLOCK keeps a FIFO/device swapped in after lstat from blocking the
+    // open; the fstat below then rejects the non-regular descriptor before any read.
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
     const opened = fstatSync(descriptor, { bigint: true });
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+    if (opened.dev !== before.dev || opened.ino !== before.ino) {
       return unavailable('unavailable', 'file changed while opening');
     }
+    if (!opened.isFile()) return unavailable('unavailable', 'not a regular file');
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(64 * 1024);
     let total = 0;

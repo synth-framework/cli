@@ -141,6 +141,11 @@ optional, and missing reasons are shown. If a reason becomes known later, add a
 work `update` that names the revision ID: that is a plain note, not an automatic
 structured link. A revision is a caller-reported change, not an authorization.
 
+In the JSON handoff, the version-1 arrays (`outcomes`, `scope`, `constraints`,
+`nonGoals`, `criteria`, `verification`) contain active entries only, so
+consumers that do not know the newer `active` field never read removed work as
+current; removed entries are listed separately under `removedEntries`.
+
 Checks retain the criterion versions linked at **request** time, evidence at
 recording time, and evaluations at assessment time. When a criterion is
 revised, an evaluation of an earlier version remains in history but is not
@@ -196,8 +201,14 @@ check, SYNTH records the result when possible and exits 130 for SIGINT or 143
 for SIGTERM. Arguments after `--` belong to the selected command, including any
 `--json` argument there.
 
-The envelope remains output version 1; newer slices add fields. Consumers
-should inspect `outputVersion` and tolerate added fields. Record schemas 1 and 2
+The envelope is normally output version 1; newer slices add fields. Consumers
+should inspect `outputVersion` and tolerate added fields. One exception:
+`status` and `handoff` emit output version 2 once the intention has been
+revised (`intentionRevisionId` is set), because the v1 handoff field
+`originalIntention` then no longer describes the current objective. In an
+output version 2 envelope, v1 consumers that ignore added fields must read
+`currentIntention` as the objective; `originalIntention` keeps the original
+text for history. Record schemas 1 and 2
 are read without modification; the first successful mutation upgrades them
 atomically to schema 3, retaining existing context, checks, evidence, and
 evaluations. Because schema 2 did not support criterion revisions, its existing

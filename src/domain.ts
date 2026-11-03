@@ -287,6 +287,10 @@ export interface Handoff {
   nonGoals: RevisedEntry[];
   criteria: CriterionView[];
   verification: RevisedEntry[];
+  // The v1-named arrays above hold active entries only, so consumers that
+  // ignore the newer `active` field never read removed work as current;
+  // removed entries are exposed separately under `removedEntries`.
+  removedEntries: RevisedEntry[];
   questions: QuestionView[];
   assumptions: Entry[];
   plan: Entry[];
@@ -376,13 +380,15 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const decisions = select('decision');
   const gaps = select('gap');
   const nextActions = select('next');
+  // Missing context means never recorded; a category whose entries were all
+  // explicitly removed is recorded-but-removed, not missing.
   const groups: [string, readonly unknown[]][] = [
-    ['outcomes', outcomes.filter((item) => item.active)],
-    ['scope', scope.filter((item) => item.active)],
-    ['constraints', constraints.filter((item) => item.active)],
-    ['nonGoals', nonGoals.filter((item) => item.active)],
-    ['criteria', criteria.filter((item) => item.active)],
-    ['verification', verification.filter((item) => item.active)],
+    ['outcomes', outcomes],
+    ['scope', scope],
+    ['constraints', constraints],
+    ['nonGoals', nonGoals],
+    ['criteria', criteria],
+    ['verification', verification],
     ['questions', questions], ['assumptions', assumptions], ['plan', plan],
     ['updates', updates], ['workReferences', workReferences], ['decisions', decisions],
     ['gaps', gaps], ['nextActions', nextActions],
@@ -393,13 +399,18 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const baselineComparison = latestBaseline ? compareBaselines(state, latestBaseline.id, undefined, observations) : null;
   const previousBaselineComparison = latestBaseline && previousBaseline ? compareBaselines(state, previousBaseline.id, latestBaseline.id, observations) : null;
   const intention = currentIntention(state);
+  const activeOnly = <T extends { active: boolean }>(items: T[]): T[] => items.filter((item) => item.active);
+  const removedEntries = [...outcomes, ...scope, ...constraints, ...nonGoals, ...criteria, ...verification]
+    .filter((item) => !item.active);
   return {
     recordVersion: record.schemaVersion,
     originalIntention: state.originalIntention,
     currentIntention: intention.text,
     intentionRevisionId: intention.revisionId,
     createdAt: state.createdAt,
-    outcomes, scope, constraints, nonGoals, criteria, verification, questions, assumptions,
+    outcomes: activeOnly(outcomes), scope: activeOnly(scope), constraints: activeOnly(constraints),
+    nonGoals: activeOnly(nonGoals), criteria: activeOnly(criteria), verification: activeOnly(verification),
+    removedEntries, questions, assumptions,
     plan, updates, workReferences, decisions, gaps, nextActions, checks, evidence, evaluations,
     revisions: state.revisions,
     baselines: state.baselines,

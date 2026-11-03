@@ -99,8 +99,8 @@ async function main(argv: string[]): Promise<void> {
       usedOptions.add(token.name);
     }
     const outputJson = values.json === true;
-    const writeSuccess = (name: string, data: unknown, human: string): void => {
-      if (outputJson) process.stdout.write(`${JSON.stringify({ outputVersion: OUTPUT_VERSION, ok: true, command: name, data })}\n`);
+    const writeSuccess = (name: string, data: unknown, human: string, version: number = OUTPUT_VERSION): void => {
+      if (outputJson) process.stdout.write(`${JSON.stringify({ outputVersion: version, ok: true, command: name, data })}\n`);
       else process.stdout.write(`${human}\n`);
     };
 
@@ -304,7 +304,10 @@ async function main(argv: string[]): Promise<void> {
     if (positionals.length !== 1) throw usageError(`${command} does not accept positional arguments.`);
     const handoff = makeHandoff(readRecord(location));
     const human = command === 'status' ? renderStatus(location, handoff) : renderHandoff(location, handoff);
-    writeSuccess(command, { recordPath: location, handoff }, human);
+    // A revised intention makes the v1 originalIntention field stale, so signal
+    // an incompatible envelope version: v1 consumers must read currentIntention.
+    const version = handoff.intentionRevisionId !== null ? 2 : OUTPUT_VERSION;
+    writeSuccess(command, { recordPath: location, handoff }, human, version);
   } catch (error) {
     const failure = error instanceof SynthError ? error : new SynthError('INTERNAL_ERROR', 'Unexpected error. Inspect the work record before retrying.', 1);
     if (jsonRequested) {
