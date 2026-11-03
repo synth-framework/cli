@@ -187,6 +187,35 @@ added since then. This is not a freshness guarantee for the assessment as a
 whole: other areas, evidence relevance, and untracked inputs may also matter.
 Capturing a new baseline does not erase earlier changes or assessments.
 
+## Claims, acceptance, QA coverage, and delivery targets
+
+`synth add claim --text '...'` records a consequential statement. Correct it with
+`synth revise CL1 --text '...' [--reason ...]`; the original text stays in the
+revision history and the handoff shows the current revision and original.
+Detecting a change is not the same as judging its meaning: SYNTH records the
+correction, it does not declare the claim true or false.
+
+`synth accept --statement '...' [--gap G1]...` records a **self-attestation of
+acceptance with known gaps** (repeat `--gap` for existing gap IDs). It is not
+proof a human was present, not a verification, and not delegation; recording it
+deliberately does **not** depend on freshness. `synth accept --reassess ...`
+records a new acceptance after relevant changes. The handoff and status report
+whether the latest acceptance is `current` or `reassessment_needed`, listing
+what changed since (entries, revisions, baselines, checks, evidence,
+evaluations) by comparing recorded counts — not timestamps.
+
+`synth deliver --target code|pr-handoff|artifact|documentation|deployment|observed-outcome --text '...'`
+records a delivery **goal**. Delivery targets are kept separate from recorded
+activities: an update saying "implemented" is not a delivery outcome, and no
+goal is inferred from another.
+
+`synth check run|record --case positive|negative|boundary|regression ...`
+labels a check's case type so coverage of negative and boundary cases stays
+visible. The handoff's **QA coverage** section summarizes criteria
+(evaluated/unverified), checks by status and case, evidence and evaluation
+counts, drift-assessment findings, and residual risks (recorded gaps, unknown
+selected files). Coverage is recorded coverage, not proof of adequacy.
+
 ## JSON and errors
 
 With `--json`, a successful command writes one JSON object to stdout:
@@ -208,15 +237,17 @@ revised (`intentionRevisionId` is set), because the v1 handoff field
 `originalIntention` then no longer describes the current objective. In an
 output version 2 envelope, v1 consumers that ignore added fields must read
 `currentIntention` as the objective; `originalIntention` keeps the original
-text for history. Record schemas 1 and 2
+text for history. Record schemas 1, 2, and 3
 are read without modification; the first successful mutation upgrades them
-atomically to schema 3, retaining existing context, checks, evidence, and
-evaluations. Because schema 2 did not support criterion revisions, its existing
-checks, evidence, and evaluations are associated with the original criterion
-versions on upgrade; no check inputs are inferred. Older Slice 1 and Slice 2
-binaries reject schema 3 rather than dropping its fields. Unsupported schemas
-and corrupt records remain untouched; keep a backup if backward compatibility
-is needed.
+atomically to schema 4, retaining existing context, checks, evidence,
+evaluations, revisions, and baselines, and adding empty `acceptances` and
+`deliveryTargets` plus a `caseType` label on each check. Because schema 2 did
+not support criterion revisions, its existing checks, evidence, and evaluations
+are associated with the original criterion versions on upgrade; no check inputs
+are inferred. Older Slice 1, Slice 2, and Slice 3 binaries reject schema 4
+rather than dropping its fields (including `claim` entries, which only schema 4
+records may contain). Unsupported schemas and corrupt records remain untouched;
+keep a backup if backward compatibility is needed.
 
 ## Local storage and recovery
 

@@ -1,4 +1,4 @@
-import type { Entry, EntryKind, WorkRecord, WorkRecordV3 } from './domain.js';
+import type { Entry, EntryKind, WorkRecord, WorkRecordV4 } from './domain.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, snapshotFile, type FileSnapshot } from './fingerprint.js';
@@ -8,7 +8,7 @@ export type BaselineArea = 'intention' | 'scope' | 'criteria' | 'verification';
 export type DriftFinding = 'intentional' | 'unintended' | 'uncertain' | 'no_concern';
 
 const scopeKinds: readonly EntryKind[] = ['outcome', 'scope', 'constraint', 'non-goal'];
-const revisableKinds: readonly EntryKind[] = [...scopeKinds, 'criterion', 'verification'];
+const revisableKinds: readonly EntryKind[] = [...scopeKinds, 'criterion', 'verification', 'claim'];
 
 export interface Revision {
   id: string;
@@ -167,9 +167,9 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   if (!Array.isArray(value.revisions) || !Array.isArray(value.baselines) || !Array.isArray(value.driftAssessments) ||
       !Array.isArray(value.checkContexts) || !Array.isArray(value.evidenceContexts) || !Array.isArray(value.evaluationContexts)) corrupt('baseline history and contexts must be arrays');
   const entries = value.entries as Entry[];
-  const checks = value.checks as WorkRecordV3['checks'];
-  const evidence = value.evidence as WorkRecordV3['evidence'];
-  const evaluations = value.evaluations as WorkRecordV3['evaluations'];
+  const checks = value.checks as WorkRecordV4['checks'];
+  const evidence = value.evidence as WorkRecordV4['evidence'];
+  const evaluations = value.evaluations as WorkRecordV4['evaluations'];
   const revisions = value.revisions as unknown[];
   const baselines = value.baselines as unknown[];
   const assessments = value.driftAssessments as unknown[];
@@ -283,7 +283,7 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   }
 }
 
-export function revisionIdAt(record: WorkRecordV3, target: string, revisionCount = record.revisions.length): string | null {
+export function revisionIdAt(record: WorkRecordV4, target: string, revisionCount = record.revisions.length): string | null {
   for (let index = Math.min(revisionCount, record.revisions.length) - 1; index >= 0; index--) {
     const revision = record.revisions[index]!;
     if (revision.target === target) return revision.id;
@@ -304,7 +304,7 @@ export function projectEntry(entry: Entry, revisions: readonly Revision[], count
   return { ...entry, text, originalText: entry.text, active, revisionId };
 }
 
-export function currentIntention(record: WorkRecordV3, count = record.revisions.length): { text: string; revisionId: string | null } {
+export function currentIntention(record: WorkRecordV4, count = record.revisions.length): { text: string; revisionId: string | null } {
   let text = record.originalIntention;
   let revisionId: string | null = null;
   for (const revision of record.revisions.slice(0, count)) {
@@ -313,13 +313,13 @@ export function currentIntention(record: WorkRecordV3, count = record.revisions.
   return { text, revisionId };
 }
 
-export function addRevision(record: WorkRecord, input: { target: string; text: string | null; reason: string | null; evidenceIds: string[] }): { record: WorkRecordV3; revision: Revision } {
+export function addRevision(record: WorkRecord, input: { target: string; text: string | null; reason: string | null; evidenceIds: string[] }): { record: WorkRecordV4; revision: Revision } {
   const next = upgradeRecord(record);
   if (input.target === 'intention') {
     if (input.text === null) throw usageError('The original intention cannot be removed; revise its text instead.');
   } else {
     const target = next.entries.find((entry) => entry.id === input.target);
-    if (!target || !revisableKinds.includes(target.kind)) throw usageError('Revise intention or an existing outcome, scope, constraint, non-goal, criterion, or verification ID.');
+    if (!target || !revisableKinds.includes(target.kind)) throw usageError('Revise intention or an existing outcome, scope, constraint, non-goal, criterion, verification, or claim ID.');
   }
   if (!references(input.evidenceIds, new Set(next.evidence.map((item) => item.id)))) throw usageError('Evidence IDs must be distinct existing IDs (at most 100).');
   const revision: Revision = {
@@ -330,7 +330,7 @@ export function addRevision(record: WorkRecord, input: { target: string; text: s
 }
 
 /** files=null inherits the last explicitly selected paths; [] explicitly clears them. */
-export function captureBaseline(record: WorkRecord, input: { reason: string | null; files: string[] | null }): { record: WorkRecordV3; baseline: Baseline } {
+export function captureBaseline(record: WorkRecord, input: { reason: string | null; files: string[] | null }): { record: WorkRecordV4; baseline: Baseline } {
   const next = upgradeRecord(record);
   const paths = input.files ?? next.baselines.at(-1)?.files.map((item) => item.path) ?? [];
   if (paths.length > MAX_BASELINE_FILES || new Set(paths).size !== paths.length) throw usageError(`Select at most ${MAX_BASELINE_FILES} distinct baseline files.`);
@@ -343,7 +343,7 @@ export function captureBaseline(record: WorkRecord, input: { reason: string | nu
   return { record: { ...next, baselines: [...next.baselines, baseline] }, baseline };
 }
 
-export function addDriftAssessment(record: WorkRecord, input: { baselineId: string; area: BaselineArea; finding: DriftFinding; reason: string; evidenceIds: string[] }): { record: WorkRecordV3; assessment: DriftAssessment } {
+export function addDriftAssessment(record: WorkRecord, input: { baselineId: string; area: BaselineArea; finding: DriftFinding; reason: string; evidenceIds: string[] }): { record: WorkRecordV4; assessment: DriftAssessment } {
   const next = upgradeRecord(record);
   const baseline = next.baselines.find((item) => item.id === input.baselineId);
   if (!baseline) throw usageError(`Baseline ${input.baselineId} is not in this work record.`);
@@ -358,7 +358,7 @@ export function addDriftAssessment(record: WorkRecord, input: { baselineId: stri
   return { record: { ...next, driftAssessments: [...next.driftAssessments, assessment] }, assessment };
 }
 
-function itemsAt(record: WorkRecordV3, area: BaselineArea, entryCount: number, revisionCount: number): SnapshotItem[] {
+function itemsAt(record: WorkRecordV4, area: BaselineArea, entryCount: number, revisionCount: number): SnapshotItem[] {
   if (area === 'intention') {
     const intention = currentIntention(record, revisionCount);
     return [{ id: 'intention', kind: 'intention', ...intention }];
@@ -374,7 +374,7 @@ function belongsToArea(area: BaselineArea, kind: EntryKind): boolean {
     : area === 'verification' ? kind === 'verification' : false;
 }
 
-function compareArea(record: WorkRecordV3, area: BaselineArea, beforeItems: SnapshotItem[], afterItems: SnapshotItem[], beforeFiles: FileSnapshot[], afterFiles: FileSnapshot[], revisions: Revision[], entries: Entry[]): AreaComparison {
+function compareArea(record: WorkRecordV4, area: BaselineArea, beforeItems: SnapshotItem[], afterItems: SnapshotItem[], beforeFiles: FileSnapshot[], afterFiles: FileSnapshot[], revisions: Revision[], entries: Entry[]): AreaComparison {
   const beforeById = new Map(beforeItems.map((item) => [item.id, item]));
   const afterById = new Map(afterItems.map((item) => [item.id, item]));
   const ids = [...new Set([...beforeById.keys(), ...afterById.keys()])];
@@ -438,7 +438,7 @@ function observe(paths: readonly string[], cache: ObservationCache): FileSnapsho
   });
 }
 
-export function compareBaselines(record: WorkRecordV3, baselineId: string, targetId?: string, cache: ObservationCache = new Map()): BaselineComparison {
+export function compareBaselines(record: WorkRecordV4, baselineId: string, targetId?: string, cache: ObservationCache = new Map()): BaselineComparison {
   const before = record.baselines.find((item) => item.id === baselineId);
   if (!before) throw usageError(`Baseline ${baselineId} is not in this work record.`);
   const after = targetId === undefined ? undefined : record.baselines.find((item) => item.id === targetId);
@@ -490,7 +490,7 @@ export function compareBaselines(record: WorkRecordV3, baselineId: string, targe
   };
 }
 
-export function assessmentView(record: WorkRecordV3, assessment: DriftAssessment, cache: ObservationCache = new Map()): DriftAssessmentView {
+export function assessmentView(record: WorkRecordV4, assessment: DriftAssessment, cache: ObservationCache = new Map()): DriftAssessmentView {
   const baseline = record.baselines.find((item) => item.id === assessment.baselineId)!;
   const files = assessment.area === 'verification' ? observe(baseline.files.map((item) => item.path), cache) : [];
   const revisions = record.revisions.slice(assessment.revisionCount);
