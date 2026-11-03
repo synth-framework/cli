@@ -197,6 +197,13 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
     // Revision entry counts were checked as nondecreasing above.
     return revisionCount === 0 || (revisions[revisionCount - 1] as Revision).entryCount <= entryCount;
   };
+  // Revision evidence counts were also checked as nondecreasing, so the last
+  // included revision carries the maximum: a baseline or assessment must not
+  // enclose revisions that cite evidence beyond its own evidence prefix.
+  const revisionsCiteIncludedEvidence = (revisionCount: unknown, evidenceCount: unknown): boolean => {
+    if (!validCount(revisionCount, revisions.length) || !validCount(evidenceCount, evidence.length)) return false;
+    return revisionCount === 0 || (revisions[revisionCount - 1] as Revision).evidenceCount <= evidenceCount;
+  };
   const baselineIds = new Set<string>();
   lastEntryCount = 0;
   let lastRevisionCount = 0;
@@ -206,7 +213,8 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   for (const raw of baselines) {
     if (!object(raw) || !keys(raw, ['id', 'reason', 'entryCount', 'revisionCount', 'checkCount', 'evidenceCount', 'evaluationCount', 'files', 'createdAt'])) corrupt('invalid baseline fields');
     if (!validId(raw.id, 'B') || baselineIds.has(raw.id) || !optionalText(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid baseline');
-    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !validCount(raw.checkCount, checks.length) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.evaluationCount, evaluations.length) ||
+    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !revisionsCiteIncludedEvidence(raw.revisionCount, raw.evidenceCount) ||
+        !validCount(raw.checkCount, checks.length) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.evaluationCount, evaluations.length) ||
         (raw.entryCount as number) < lastEntryCount || (raw.revisionCount as number) < lastRevisionCount || (raw.checkCount as number) < lastCheckCount ||
         (raw.evidenceCount as number) < lastEvidenceCount || (raw.evaluationCount as number) < lastEvaluationCount || !filesValid(raw.files)) corrupt('invalid baseline contents');
     baselineIds.add(raw.id as string);
@@ -225,7 +233,8 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
     if (!object(raw) || !keys(raw, ['id', 'baselineId', 'area', 'finding', 'reason', 'evidenceIds', 'entryCount', 'revisionCount', 'evidenceCount', 'baselineCount', 'files', 'createdAt'])) corrupt('invalid drift assessment fields');
     if (!validId(raw.id, 'DA') || assessmentIds.has(raw.id) || !['intention', 'scope', 'criteria', 'verification'].includes(String(raw.area)) ||
         !['intentional', 'unintended', 'uncertain', 'no_concern'].includes(String(raw.finding)) || !nonblank(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid drift assessment');
-    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.baselineCount, baselines.length) ||
+    if (!validPrefixes(raw.entryCount, raw.revisionCount) || !revisionsCiteIncludedEvidence(raw.revisionCount, raw.evidenceCount) ||
+        !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.baselineCount, baselines.length) ||
         (raw.entryCount as number) < lastEntryCount || (raw.revisionCount as number) < lastRevisionCount ||
         (raw.evidenceCount as number) < lastEvidenceCount || (raw.baselineCount as number) < lastBaselineCount) corrupt('invalid drift assessment history counts');
     const baseline = (baselines.slice(0, raw.baselineCount as number) as Baseline[]).find((item) => item.id === raw.baselineId);
@@ -459,10 +468,13 @@ export function compareBaselines(record: WorkRecordV3, baselineId: string, targe
   };
   const evidenceCount = after ? Math.max(before.evidenceCount, after.evidenceCount) : record.evidence.length;
   const evaluationCount = after ? Math.max(before.evaluationCount, after.evaluationCount) : record.evaluations.length;
+  const checkCount = after ? Math.max(before.checkCount, after.checkCount) : record.checks.length;
   const availableEvidence = record.evidence.slice(0, evidenceCount);
+  const checksById = new Map(record.checks.slice(0, checkCount).map((check) => [check.id, check]));
   for (const revision of revisions) for (const id of revision.evidenceIds) addCandidate(id, 'declared_by_revision');
   for (const item of availableEvidence) {
     if (item.criterionIds.some((id) => changedCriteria.has(id))) addCandidate(item.id, 'criterion_link');
+    if (item.checkId !== null && checksById.get(item.checkId)?.criterionIds.some((id) => changedCriteria.has(id))) addCandidate(item.id, 'check_criterion_link');
     if (item.subjectFile !== null && changedFiles.has(item.subjectFile.path)) addCandidate(item.id, 'selected_subject_file');
     if (item.checkId !== null && ['changed', 'unknown'].includes(areas.verification.state)) addCandidate(item.id, 'check_inputs_unknown');
   }

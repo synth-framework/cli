@@ -132,7 +132,7 @@ export function renderComparison(comparison: BaselineComparison): string {
   const lines = [`Baseline ${comparison.baselineId} -> ${comparison.comparedTo} (${comparison.direction}; recorded changes, not a semantic drift judgment):`];
   for (const area of ['intention', 'scope', 'criteria', 'verification'] as const) {
     const result = comparison.areas[area];
-    lines.push(`  ${area}: ${result.state}.`);
+    lines.push(`  ${area}: ${result.state}${result.unknownFileCount > 0 ? `; unknown selected files ${result.unknownFileCount}` : ''}.`);
     for (const change of result.changes) {
       lines.push(`    ${change.id} ${change.change}: ${JSON.stringify(change.before?.text ?? null)} -> ${JSON.stringify(change.after?.text ?? null)}`);
       if (change.entryReason !== null) lines.push(`      Entry reason: ${indented(change.entryReason, '        ')}`);
@@ -184,6 +184,10 @@ export function renderHandoff(location: string, handoff: Handoff): string {
     'Drift assessments (caller-reported, not independently verified):',
     ...handoff.driftAssessments.map((item) => `  ${item.id}: ${item.baselineId} ${item.area} [${item.finding}]; compared area since assessment: ${item.areaBasisState}; unknown selected files: ${item.areaUnknownFileCount}; cited evidence: ${item.evidenceIds.join(', ') || 'none recorded'}; later evidence: ${item.evidenceAddedSince.join(', ') || 'none recorded'}; reason: ${indented(item.reason, '    ')}`),
   ].join('\n');
+  const removed = handoff.removedEntries.length === 0 ? [] : [
+    'Removed entries (retained in history, not current):',
+    ...handoff.removedEntries.map((item) => `  ${item.id} [removed${item.revisionId ? ` by ${item.revisionId}` : ''}]: ${indented(item.text)}`),
+  ];
   return [
     'SYNTH handoff', `Record: ${location}`, `Original intention: ${indented(handoff.originalIntention, '  ')}`,
     `Current intention${handoff.intentionRevisionId ? ` (${handoff.intentionRevisionId})` : ''}: ${indented(handoff.currentIntention, '  ')}`,
@@ -197,6 +201,7 @@ export function renderHandoff(location: string, handoff: Handoff): string {
     renderEntries('Decision notes (not automatically superseded)', handoff.decisions, { decisions: true }),
     renderEntries('Gap notes (not automatically resolved)', handoff.gaps),
     renderEntries('Next-action notes (not automatically completed)', handoff.nextActions),
+    ...removed,
     renderChecks(handoff), renderEvidence(handoff), evaluationHistory,
     revisions, baselines,
     ...(handoff.previousBaselineComparison ? [renderComparison(handoff.previousBaselineComparison)] : []),
@@ -210,13 +215,15 @@ export function renderHandoff(location: string, handoff: Handoff): string {
 export function renderStatus(location: string, handoff: Handoff): string {
   const unansweredQuestions = handoff.questions.filter((question) => question.state === 'unanswered').length;
   const activeCriteria = handoff.criteria.filter((criterion) => criterion.active);
+  const removedCriteria = handoff.removedEntries.filter((item) => item.kind === 'criterion');
   const unverified = activeCriteria.filter((criterion) => criterion.evaluation === 'unverified').length;
   const missing = handoff.missingContext.map((key) => labels[key] ?? key);
   const baseline = handoff.baselineComparison;
   return [
     'SYNTH status', `Record: ${location}`, `Original intention: ${indented(handoff.originalIntention, '  ')}`,
     `Current intention${handoff.intentionRevisionId ? ` (${handoff.intentionRevisionId})` : ''}: ${indented(handoff.currentIntention, '  ')}`,
-    `Criteria: ${activeCriteria.length} active of ${handoff.criteria.length} recorded; ${unverified} unverified.`,
+    `Criteria: ${activeCriteria.length} active of ${handoff.criteria.length + removedCriteria.length} recorded; ${unverified} unverified.`,
+    ...(removedCriteria.length > 0 ? [`  Removed criteria (not current): ${removedCriteria.map((item) => item.id).join(', ')}.`] : []),
     ...handoff.criteria.map((item) => `  ${item.id} [${item.active ? '' : 'removed; '}${item.evaluation}]; evidence freshness: ${item.freshness}${item.priorEvaluationIds.length ? '; earlier-version evaluations retained' : ''}.`),
     baseline ? `Baseline ${baseline.baselineId}: intention ${baseline.areas.intention.state}; scope ${baseline.areas.scope.state}; criteria ${baseline.areas.criteria.state}; verification ${baseline.areas.verification.state}; unknown selected files ${baseline.areas.verification.unknownFileCount} (changes are not semantic judgments).` : 'Baseline: not recorded.',
     `Recorded drift assessments: ${handoff.driftAssessments.length} (caller-reported).`,

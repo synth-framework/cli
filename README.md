@@ -141,6 +141,11 @@ optional, and missing reasons are shown. If a reason becomes known later, add a
 work `update` that names the revision ID: that is a plain note, not an automatic
 structured link. A revision is a caller-reported change, not an authorization.
 
+In the JSON handoff, the version-1 arrays (`outcomes`, `scope`, `constraints`,
+`nonGoals`, `criteria`, `verification`) contain active entries only, so
+consumers that do not know the newer `active` field never read removed work as
+current; removed entries are listed separately under `removedEntries`.
+
 Checks retain the criterion versions linked at **request** time, evidence at
 recording time, and evaluations at assessment time. When a criterion is
 revised, an evaluation of an earlier version remains in history but is not

@@ -1393,7 +1393,9 @@ test('criterion revisions preserve checks and evidence without applying older ev
   jsonSuccess(run(dir, ['revise', 'C1', '--remove', '--reason', 'Temporarily out of scope', '--json']), 'revise');
   jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'unverified', '--reason', 'Historical assessment while inactive', '--json']), 'evaluate');
   handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
-  assert.equal(handoff.criteria[0].active, false);
+  // v1-named arrays stay active-only; removed entries are exposed separately.
+  assert.equal(handoff.criteria.length, 0);
+  assert.ok(handoff.removedEntries.some((item) => item.id === 'C1' && item.active === false));
   assert.equal(handoff.evaluations.at(-1).criterionContext.state, 'inactive');
   assert.ok(handoff.missingContext.includes('criteria'));
   jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Original criterion', '--reason', 'Restored', '--json']), 'revise');
