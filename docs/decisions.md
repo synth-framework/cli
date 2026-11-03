@@ -65,5 +65,8 @@
 
 Broader project-wide and automated semantic drift assessment, the acceptance
 and delegation interface, and actual macOS and representative remote workspace
-results remain open. The developer plans macOS testing after Slice 3. Platform
-targets are not evidence of platform validation.
+results remain open. By developer decision (2026-11-03), macOS and Windows/WSL2
+validation is pushed to the final stage (after Slice 4), tracked as backlog
+issue FV-01 under the final-stage milestone; representative remote-workspace
+results stay with S1-05. Platform targets are not evidence of platform
+validation.
