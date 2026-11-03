@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { WorkRecord, WorkRecordV4 } from './domain.js';
+import type { WorkRecord, WorkRecordV5 } from './domain.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, type FileSnapshot, type Freshness } from './fingerprint.js';
@@ -11,6 +11,8 @@ export const MAX_TIMEOUT_MS = 300_000;
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 export type DirtyState = 'clean' | 'dirty' | 'unknown';
+/** Caller's expected check outcome (e.g. TDD red/green); a recorded expectation, not a judgment. */
+export type Expectation = 'pass' | 'fail';
 export type CheckStatus = 'pending' | 'passed' | 'failed' | 'timed_out' | 'interrupted' | 'could_not_start' | 'skipped' | 'inconclusive';
 export type Verdict = 'unverified' | 'supported' | 'contradicted' | 'inconclusive' | 'not_applicable';
 
@@ -49,6 +51,7 @@ export interface Check {
   outputRef: string | null;
   output: CheckOutput | null;
   caseType: CaseType | null;
+  expect: Expectation | null;
 }
 
 export interface Evidence {
@@ -75,6 +78,7 @@ export interface Evaluation {
 }
 
 export interface CheckView extends Check {
+  expectationMet: boolean | null;
   criterionContexts: CriterionContextView[];
 }
 
@@ -106,6 +110,7 @@ export interface CheckInput {
   captureOutput: boolean;
   outputRef: string | null;
   caseType: CaseType | null;
+  expect: Expectation | null;
 }
 
 export interface EvidenceInput {
@@ -145,11 +150,12 @@ export function validateVerification(value: Record<string, unknown>, criterionId
     corrupt('checks, evidence, and evaluations must be arrays');
   }
   const baseCheckKeys = ['id', 'invocation', 'status', 'argv', 'cwd', 'criterionIds', 'requestedAt', 'startedAt', 'endedAt', 'exitCode', 'signal', 'reason', 'revision', 'dirty', 'provenance', 'timeoutMs', 'captureOutput', 'outputRef', 'output'];
-  const checkKeys = schema >= 4 ? [...baseCheckKeys, 'caseType'] : baseCheckKeys;
+  const checkKeys = schema >= 5 ? [...baseCheckKeys, 'caseType', 'expect'] : schema >= 4 ? [...baseCheckKeys, 'caseType'] : baseCheckKeys;
   const checks = new Map<string, Check>();
   for (const raw of value.checks as unknown[]) {
     if (!object(raw) || !keys(raw, checkKeys)) corrupt('invalid check fields');
     if (schema >= 4 && !(raw.caseType === null || CASE_TYPES.includes(raw.caseType as CaseType))) corrupt('invalid check case label');
+    if (schema >= 5 && !(raw.expect === null || raw.expect === 'pass' || raw.expect === 'fail')) corrupt('invalid check expectation');
     if (!validId(raw.id, 'CHK') || checks.has(raw.id)) corrupt('invalid or duplicate check ID');
     if (raw.invocation !== 'run' && raw.invocation !== 'reported') corrupt('invalid check invocation');
     if (!['pending', 'passed', 'failed', 'timed_out', 'interrupted', 'could_not_start', 'skipped', 'inconclusive'].includes(String(raw.status))) corrupt('invalid check status');
@@ -203,7 +209,7 @@ function requireCriteria(record: WorkRecord, ids: string[], required = false): v
   if (!references(ids, known, required)) throw usageError('Criterion IDs must be distinct existing IDs (at most 100).');
 }
 
-export function addCheck(record: WorkRecord, input: CheckInput, reported?: { status: 'skipped' | 'inconclusive'; reason: string }): { record: WorkRecordV4; check: Check } {
+export function addCheck(record: WorkRecord, input: CheckInput, reported?: { status: 'skipped' | 'inconclusive'; reason: string }): { record: WorkRecordV5; check: Check } {
   requireCriteria(record, input.criterionIds);
   const next = upgradeRecord(record);
   const check: Check = {
@@ -212,13 +218,13 @@ export function addCheck(record: WorkRecord, input: CheckInput, reported?: { sta
     startedAt: null, endedAt: null, exitCode: null, signal: null, reason: reported?.reason ?? null,
     revision: input.revision, dirty: input.dirty, provenance: input.provenance,
     timeoutMs: reported ? null : input.timeoutMs, captureOutput: reported ? false : input.captureOutput,
-    outputRef: input.outputRef, output: null, caseType: input.caseType,
+    outputRef: input.outputRef, output: null, caseType: input.caseType, expect: input.expect ?? null,
   };
   const context = { checkId: check.id, entryCount: next.entries.length, revisionCount: next.revisions.length };
   return { record: { ...next, checks: [...next.checks, check], checkContexts: [...next.checkContexts, context] }, check };
 }
 
-export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV4 {
+export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV5 {
   const next = upgradeRecord(record);
   const index = next.checks.findIndex((check) => check.id === completed.id);
   if (index < 0 || next.checks[index]!.status !== 'pending') throw usageError(`Check ${completed.id} is missing or is no longer pending; inspect the record.`);
@@ -227,7 +233,7 @@ export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV
   return { ...next, checks };
 }
 
-export function addEvidence(record: WorkRecord, input: EvidenceInput): { record: WorkRecordV4; evidence: Evidence } {
+export function addEvidence(record: WorkRecord, input: EvidenceInput): { record: WorkRecordV5; evidence: Evidence } {
   requireCriteria(record, input.criterionIds);
   const next = upgradeRecord(record);
   if (input.checkId !== null && !next.checks.some((item) => item.id === input.checkId)) {
@@ -238,7 +244,7 @@ export function addEvidence(record: WorkRecord, input: EvidenceInput): { record:
   return { record: { ...next, evidence: [...next.evidence, evidence], evidenceContexts: [...next.evidenceContexts, context] }, evidence };
 }
 
-export function addEvaluation(record: WorkRecord, input: EvaluationInput): { record: WorkRecordV4; evaluation: Evaluation } {
+export function addEvaluation(record: WorkRecord, input: EvaluationInput): { record: WorkRecordV5; evaluation: Evaluation } {
   requireCriteria(record, [input.criterionId], true);
   const next = upgradeRecord(record);
   const known = new Set(next.evidence.map((item) => item.id));

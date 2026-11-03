@@ -148,6 +148,14 @@ function runWithPreload(directory, preload, args, options = {}) {
   return result;
 }
 
+// The outer `node --test` sets NODE_TEST_CONTEXT, which makes a nested
+// `node --test` exit 0 even on failure; strip it for checks that must really run.
+function runWithoutTestContext(directory, args) {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return run(directory, args, { env });
+}
+
 function jsonSuccess(result, command) {
   assert.equal(result.status, 0, `expected success; stdout=${result.stdout}\nstderr=${result.stderr}`);
   assert.equal(result.stderr, '');
@@ -298,7 +306,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
   const dir = fixture();
   assert.equal(existsSync(join(dir, '.git')), false);
   const created = initialize(dir, 'Explore title behavior');
-  assert.equal(created.record.schemaVersion, 4);
+  assert.equal(created.record.schemaVersion, 5);
   assert.equal(created.record.originalIntention, 'Explore title behavior');
   assert.deepEqual(created.record.entries, []);
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
@@ -317,6 +325,9 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
     baselines: 'available',
     driftAssessment: 'available',
     acceptance: 'available',
+    practices: 'available',
+    scenarios: 'available',
+    checkExpectation: 'available',
     questionResolution: 'not_available',
     gapAndActionResolution: 'not_available',
     planAndDecisionSupersession: 'not_available',
@@ -362,7 +373,7 @@ test('separate processes recover, answer, and extend the recorded handoff withou
   assert.equal(first.decisions[1].reason, null);
   assert.equal(first.workReferences[0].text, 'src/title.js');
   assert.equal(first.gaps[0].text, 'No behavior evidence is recorded');
-  assert.deepEqual(first.missingContext, ['verification', 'claims']);
+  assert.deepEqual(first.missingContext, ['verification', 'claims', 'practices', 'scenarios']);
 
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace', '--reason', 'Developer clarified', '--json']), 'add');
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace, including tabs', '--reason', 'Clarified further', '--json']), 'add');
@@ -575,13 +586,13 @@ test('invalid batches and missing question references never partially modify a r
   assert.equal(readFileSync(file, 'utf8'), original);
 });
 
-test('schema 1 records remain read-only until an atomic schema 4 write', () => {
+test('schema 1 records remain read-only until an atomic schema 5 write', () => {
   const dir = fixture();
   initialize(dir);
   jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Preserve this criterion', '--json']), 'add');
   const file = recordFile(dir);
   const current = JSON.parse(readFileSync(file, 'utf8'));
-  const old = { schemaVersion: 1, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries };
+  const old = { schemaVersion: 1, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries.map(({ criterionId, ...entry }) => entry) };
   writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
   const before = snapshotTree(dir);
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
@@ -590,8 +601,8 @@ test('schema 1 records remain read-only until an atomic schema 4 write', () => {
   assert.deepEqual(snapshotTree(dir), before);
   jsonSuccess(run(dir, ['add', 'gap', '--text', 'Evidence is missing', '--json']), 'add');
   const migrated = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 4);
-  assert.deepEqual(migrated.entries[0], old.entries[0]);
+  assert.equal(migrated.schemaVersion, 5);
+  assert.deepEqual(migrated.entries[0], { ...old.entries[0], criterionId: null });
   assert.equal(migrated.entries[1].kind, 'gap');
   assert.deepEqual(migrated.checks, []);
   assert.deepEqual(migrated.evidence, []);
@@ -613,7 +624,7 @@ test('schema 2 reads are untouched and migration preserves verification against 
   jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Caller assessment', '--evidence', 'E1', '--json']), 'evaluate');
   const file = recordFile(dir);
   const current = JSON.parse(readFileSync(file, 'utf8'));
-  const old = { schemaVersion: 2, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries, checks: current.checks, evidence: current.evidence, evaluations: current.evaluations };
+  const old = { schemaVersion: 2, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries.map(({ criterionId, ...entry }) => entry), checks: current.checks.map(({ expect, ...check }) => check), evidence: current.evidence, evaluations: current.evaluations };
   writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
   const original = readFileSync(file);
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
@@ -626,7 +637,7 @@ test('schema 2 reads are untouched and migration preserves verification against 
   assert.deepEqual(readFileSync(file), original);
   jsonSuccess(run(dir, ['revise', 'C1', '--text', 'New criterion', '--reason', 'Scope changed', '--json']), 'revise');
   const migrated = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.deepEqual(migrated.evidence, old.evidence);
   assert.deepEqual(migrated.evaluations, old.evaluations);
   assert.equal(migrated.evidenceContexts[0].revisionCount, 0);
@@ -968,7 +979,7 @@ test('invalid generated state is rejected before replacing a valid record', () =
   writeFileSync(preload, `
     const original = JSON.stringify;
     JSON.stringify = function(value, ...args) {
-      if (value && value.schemaVersion === 4 && Array.isArray(value.entries)) {
+      if (value && value.schemaVersion === 5 && Array.isArray(value.entries)) {
         return original.call(this, { ...value, wouldBeLost: true }, ...args);
       }
       return original.call(this, value, ...args);
@@ -1211,8 +1222,8 @@ test('interruption before and after replacement preserves schema 1, 2, and 3 rec
     const file = recordFile(dir);
     {
       const current = JSON.parse(readFileSync(file, 'utf8'));
-      const old = { schemaVersion: schema, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries };
-      if (schema === 2) Object.assign(old, { checks: current.checks, evidence: current.evidence, evaluations: current.evaluations });
+      const old = { schemaVersion: schema, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries.map(({ criterionId, ...entry }) => entry) };
+      if (schema === 2) Object.assign(old, { checks: current.checks.map(({ expect, ...check }) => check), evidence: current.evidence, evaluations: current.evaluations });
       if (schema === 3) Object.assign(old, { checks: [], evidence: [], evaluations: [], revisions: [], baselines: [], driftAssessments: [], checkContexts: [], evidenceContexts: [], evaluationContexts: [] });
       writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
     }
@@ -1245,7 +1256,7 @@ test('interruption before and after replacement preserves schema 1, 2, and 3 rec
     const beforeRead = snapshotTree(dir);
     const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
     assert.equal(handoff.gaps.length, phase === 'before' ? 0 : 1);
-    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 4);
+    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 5);
     assert.deepEqual(snapshotTree(dir), beforeRead);
     jsonFailure(run(dir, ['add', 'gap', '--text', 'Blocked by lock', '--json']), 3, 'RECORD_LOCKED');
     assert.ok(existsSync(`${file}.lock`));
@@ -1756,4 +1767,90 @@ test('baseline file paths use the CLI working directory with an explicit record 
   assert.equal(comparison.areas.verification.files[0].change, 'matching');
   jsonSuccess(run(dir, ['handoff', '--record', custom, '--json']), 'handoff');
   assert.deepEqual(snapshotTree(dir), before);
+});
+
+test('S4-03 greenfield journey: an optional TDD red-green cycle is recorded and shown end to end', () => {
+  const dir = fixture();
+  initialize(dir, 'Add a 40-character title limit to Tiny Notes');
+  jsonSuccess(run(dir, ['add', 'practice', '--text', 'tdd', '--reason', 'Write the failing test first', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Titles longer than 40 characters are truncated to 40 characters', '--json']), 'add');
+  // Red: the new test does not exist as behavior yet, so it fails.
+  writeFileSync(join(dir, 'test', 'limit.test.js'), `import assert from 'node:assert/strict';
+import test from 'node:test';
+import { truncateTitle } from '../src/title.js';
+
+test('titles longer than 40 characters are truncated', () => {
+  assert.equal(truncateTitle('x'.repeat(50)).length, 40);
+});
+`);
+  const red = jsonSuccess(runWithoutTestContext(dir, ['check', 'run', '--criterion', 'C1', '--case', 'positive', '--expect', 'fail', '--capture-output', '--json', '--', 'node', '--test', 'test/limit.test.js']), 'check');
+  assert.equal(red.check.status, 'failed');
+  assert.equal(red.check.expect, 'fail');
+  let h = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(h.checks.length, 1);
+  assert.equal(h.checks[0].expectationMet, true, 'failing check meets the recorded fail expectation');
+  // Green: implement the behavior, then rerun expecting a pass.
+  const titleJs = join(dir, 'src', 'title.js');
+  writeFileSync(titleJs, `${readFileSync(titleJs, 'utf8')}\nexport function truncateTitle(title) {\n  const normalized = normalizeTitle(title);\n  return normalized.length > 40 ? normalized.slice(0, 40) : normalized;\n}\n`);
+  const green = jsonSuccess(runWithoutTestContext(dir, ['check', 'run', '--criterion', 'C1', '--case', 'boundary', '--expect', 'pass', '--capture-output', '--json', '--', 'node', '--test', 'test/limit.test.js']), 'check');
+  assert.equal(green.check.status, 'passed');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--check', 'CHK2', '--summary', 'Boundary check passed after implementation', '--source', 'Check CHK2', '--subject', 'truncateTitle behavior', '--limitations', 'Only the 40-character boundary is covered', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Recorded boundary check passed', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['accept', '--statement', 'TDD cycle complete: red then green', '--json']), 'accept');
+  jsonSuccess(run(dir, ['deliver', '--target', 'code', '--text', 'Truncation implemented in the fixture', '--json']), 'deliver');
+  h = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.deepEqual(h.practices.map((entry) => entry.text), ['tdd']);
+  assert.deepEqual(h.qaCoverage.practices, ['tdd']);
+  assert.deepEqual(h.checks.map((check) => check.expectationMet), [true, true]);
+  assert.equal(h.criteria[0].evaluation, 'supported');
+  assert.equal(h.acceptance.state, 'current');
+  assert.equal(h.deliveryTargets[0].target, 'code');
+  assert.equal(JSON.parse(readFileSync(recordFile(dir), 'utf8')).schemaVersion, 5);
+  const human = run(dir, ['status']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /Practices: tdd/);
+});
+
+test('S4-03 brownfield journey: BDD scenarios on existing behavior link to criteria and checks', () => {
+  const dir = fixture();
+  initialize(dir, 'Adopt SYNTH for existing Tiny Notes title behavior');
+  jsonSuccess(run(dir, ['add', 'practice', '--text', 'bdd', '--reason', 'Describe existing behavior as scenarios', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Whitespace-only titles remain empty', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'scenario', '--text', 'Given a whitespace-only title, when normalizeTitle runs, then the result is an empty string', '--criterion', 'C1', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'scenario', '--text', 'Given a padded title, when normalizeTitle runs, then surrounding whitespace is removed', '--json']), 'add');
+  const check = jsonSuccess(runWithoutTestContext(dir, ['check', 'run', '--criterion', 'C1', '--case', 'boundary', '--capture-output', '--json', '--', 'npm', 'test']), 'check');
+  assert.equal(check.check.status, 'passed');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--check', 'CHK1', '--summary', 'Existing fixture tests pass', '--source', 'Check CHK1', '--subject', 'Tiny Notes title tests', '--limitations', 'Does not cover truncation or other platforms', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Recorded boundary check covers the scenario', '--evidence', 'E1', '--json']), 'evaluate');
+  const h = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(h.scenarios.length, 2);
+  assert.equal(h.scenarios[0].criterionId, 'C1');
+  assert.equal(h.scenarios[1].criterionId, null);
+  assert.deepEqual(h.qaCoverage.scenarios, { total: 2, linked: 1 });
+  assert.equal(h.criteria[0].evaluation, 'supported');
+  assert.deepEqual(h.practices.map((entry) => entry.text), ['bdd']);
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /Scenarios \(BDD-style statements/);
+  assert.match(human.stdout, /SC1: Given a whitespace-only title/);
+  assert.match(human.stdout, /Criterion: C1/);
+});
+
+test('S4-03 documentation journey: a documentation delivery target stays separate from activities and risks', () => {
+  const dir = fixture();
+  initialize(dir, 'Document the Tiny Notes adoption');
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Platform validation is deferred to the final stage', '--json']), 'add');
+  jsonSuccess(run(dir, ['deliver', '--target', 'documentation', '--text', 'Document title behavior and the adoption steps in the fixture README', '--reason', 'Documentation is a delivery goal', '--json']), 'deliver');
+  jsonSuccess(run(dir, ['evidence', 'add', '--summary', 'Adoption steps drafted in the README', '--source', 'Developer notes', '--subject', 'Fixture README', '--limitations', 'Not independently reviewed', '--artifact', 'README.md', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['accept', '--statement', 'Documentation target recorded with the known platform gap', '--gap', 'G1', '--json']), 'accept');
+  const h = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(h.deliveryTargets.length, 1);
+  assert.equal(h.deliveryTargets[0].target, 'documentation');
+  assert.equal(h.acceptance.state, 'current');
+  assert.deepEqual(h.acceptance.knownGapIds, ['G1']);
+  assert.equal(h.qaCoverage.risks.openGaps, 1);
+  assert.equal(h.evidence[0].artifact, 'README.md');
+  const human = run(dir, ['status']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /Delivery targets \(goals, not outcomes\): T1 documentation/);
 });

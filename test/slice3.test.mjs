@@ -218,23 +218,23 @@ test('S3-07: delivery targets are recorded as goals, distinct from recorded acti
   }
 });
 
-test('schema 4 records validate, upgrade from schema 3, and reject unknown versions or kinds', () => {
+test('schema 5 records validate, upgrade from older schemas, and reject unknown versions or kinds', () => {
   const base = newRecord('Unit check');
-  assert.equal(base.schemaVersion, 4);
+  assert.equal(base.schemaVersion, 5);
   const encoded = Buffer.from(JSON.stringify(base));
-  assert.equal(decodeRecord(encoded, 'unit.json').schemaVersion, 4);
+  assert.equal(decodeRecord(encoded, 'unit.json').schemaVersion, 5);
 
-  // Schema 5 is rejected without modification.
-  assert.throws(() => decodeRecord(Buffer.from(JSON.stringify({ ...base, schemaVersion: 5 })), 'unit.json'), /schema version 5/);
+  // Schema 6 is rejected without modification.
+  assert.throws(() => decodeRecord(Buffer.from(JSON.stringify({ ...base, schemaVersion: 6 })), 'unit.json'), /schema version 6/);
 
   // A schema 3 record with a claim entry is corrupt (claims are schema-4 only).
   const v3 = { schemaVersion: 3, originalIntention: 'x', createdAt: new Date().toISOString(), entries: [{ id: 'CL1', kind: 'claim', text: 't', reason: null, questionId: null, createdAt: new Date().toISOString() }], checks: [], evidence: [], evaluations: [], revisions: [], baselines: [], driftAssessments: [], checkContexts: [], evidenceContexts: [], evaluationContexts: [] };
   assert.throws(() => decodeRecord(Buffer.from(JSON.stringify(v3)), 'unit.json'), /claims require schema version 4/);
 
-  // A schema 3 record upgrades to 4 on the next mutation, retaining entries.
+  // A schema 3 record upgrades to 5 on the next mutation, retaining entries.
   const legacy = { ...v3, entries: [{ id: 'C1', kind: 'criterion', text: 'c', reason: null, questionId: null, createdAt: new Date().toISOString() }] };
   const upgraded = appendEntries(decodeRecord(Buffer.from(JSON.stringify(legacy)), 'unit.json'), [{ kind: 'gap', text: 'g', reason: null, questionId: null }]);
-  assert.equal(upgraded.record.schemaVersion, 4);
+  assert.equal(upgraded.record.schemaVersion, 5);
   assert.equal(upgraded.record.entries.length, 2);
   assert.deepEqual(upgraded.record.acceptances, []);
   assert.deepEqual(upgraded.record.deliveryTargets, []);
@@ -268,7 +268,7 @@ test('an acceptance recorded while a check is pending flags reassessment when th
   const withCriterion = appendEntries(newRecord('Pending-window check'), [{ kind: 'criterion', text: 'c', reason: null, questionId: null }]).record;
   const pending = addCheck(withCriterion, {
     argv: ['node', '-e', ''], cwd: '/', criterionIds: ['C1'], revision: null, dirty: 'unknown',
-    provenance: 'unknown', timeoutMs: 1000, captureOutput: true, outputRef: null, caseType: null,
+    provenance: 'unknown', timeoutMs: 1000, captureOutput: true, outputRef: null, caseType: null, expect: null,
   });
   const pendingRecord = pending.record;
   assert.equal(pending.check.status, 'pending');

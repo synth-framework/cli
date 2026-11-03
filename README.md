@@ -217,6 +217,29 @@ visible. The handoff's **QA coverage** section summarizes criteria
 counts, drift-assessment findings, and residual risks (recorded gaps, unknown
 selected files). Coverage is recorded coverage, not proof of adequacy.
 
+## Optional TDD and BDD practices
+
+TDD and BDD are optional recorded practices, not mandatory processes, and SYNTH
+has no separate engine for them; both reuse the same evidence model (criteria,
+checks, evidence, evaluations, acceptance).
+
+- `synth add practice --text tdd|bdd [--reason ...]` records the chosen optional
+  practice for the work item (PRn). Any other text is a usage error.
+- `synth add scenario --text 'Given … When … Then …' [--criterion C1]` records a
+  BDD-style statement (SCn), optionally linked to one existing criterion; the
+  link must reference a recorded criterion. The same fields are accepted in
+  `add --stdin` batches (`criterionId` is valid only on a scenario).
+- `synth check run|record ... --expect pass|fail` records the caller's expected
+  outcome for a check — for example, the red step of a TDD cycle expects `fail`
+  before the implementation exists. The handoff reports `expectationMet` per
+  check: whether the recorded outcome matched the recorded expectation. That is
+  a recorded comparison, not a judgment that the expectation was correct, and it
+  is null when no expectation was recorded or the check has no pass/fail outcome.
+
+The handoff lists practices and scenarios (with their criterion link), and the QA
+coverage summary counts them. Neither practice is required: a record without them
+is normal, and `practices`/`scenarios` then appear under missing context.
+
 ## JSON and errors
 
 With `--json`, a successful command writes one JSON object to stdout:
@@ -238,17 +261,20 @@ revised (`intentionRevisionId` is set), because the v1 handoff field
 `originalIntention` then no longer describes the current objective. In an
 output version 2 envelope, v1 consumers that ignore added fields must read
 `currentIntention` as the objective; `originalIntention` keeps the original
-text for history. Record schemas 1, 2, and 3
+text for history. Record schemas 1, 2, 3, and 4
 are read without modification; the first successful mutation upgrades them
-atomically to schema 4, retaining existing context, checks, evidence,
-evaluations, revisions, and baselines, and adding empty `acceptances` and
-`deliveryTargets` plus a `caseType` label on each check. Because schema 2 did
+atomically to schema 5, retaining existing context, checks, evidence,
+evaluations, revisions, baselines, acceptances, and delivery targets, and adding
+a `criterionId` field to each entry plus an `expect` label on each check.
+Because schema 2 did
 not support criterion revisions, its existing checks, evidence, and evaluations
 are associated with the original criterion versions on upgrade; no check inputs
-are inferred. Older Slice 1, Slice 2, and Slice 3 binaries reject schema 4
-rather than dropping its fields (including `claim` entries, which only schema 4
-records may contain). Unsupported schemas and corrupt records remain untouched;
-keep a backup if backward compatibility is needed.
+are inferred. Older binaries reject schemas newer than their own rather than
+dropping fields: Slice 3 binaries reject schema 5 (including `practice`/`scenario`
+entries and check expectations), just as they reject schema 4 (including `claim`
+entries, which only schema 4 and later records may contain). Unsupported schemas
+and corrupt records remain untouched; keep a backup if backward compatibility is
+needed.
 
 ## Local storage and recovery
 

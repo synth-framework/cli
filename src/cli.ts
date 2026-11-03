@@ -9,7 +9,7 @@ import { snapshotFile } from './fingerprint.js';
 import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
-import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Verdict } from './verification.js';
+import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Expectation, type Verdict } from './verification.js';
 import { addAcceptance, addDeliveryTarget, CASE_TYPES, DELIVERY_TARGETS, type CaseType, type DeliveryTargetKind } from './review.js';
 
 const CLI_VERSION = '0.1.0';
@@ -83,7 +83,7 @@ async function main(argv: string[]): Promise<void> {
           check: { type: 'string' }, 'subject-file': { type: 'string' },
           remove: { type: 'boolean' }, file: { type: 'string', multiple: true }, 'no-files': { type: 'boolean' },
           to: { type: 'string' }, area: { type: 'string' }, finding: { type: 'string' },
-          case: { type: 'string' }, statement: { type: 'string' }, gap: { type: 'string', multiple: true },
+          case: { type: 'string' }, expect: { type: 'string' }, statement: { type: 'string' }, gap: { type: 'string', multiple: true },
           reassess: { type: 'boolean' }, target: { type: 'string' },
         },
       });
@@ -119,9 +119,9 @@ async function main(argv: string[]): Promise<void> {
     if (command === null) throw usageError('Choose a command. Run synth --help for usage.');
     const allowed: Record<string, readonly string[]> = {
       init: ['intent', 'record', 'json'],
-      add: ['text', 'reason', 'question', 'stdin', 'record', 'json'],
+      add: ['text', 'reason', 'question', 'criterion', 'stdin', 'record', 'json'],
       status: ['record', 'json'], handoff: ['record', 'json'],
-      check: ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'status', 'reason', 'case'],
+      check: ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'status', 'reason', 'case', 'expect'],
       evidence: ['record', 'json', 'criterion', 'summary', 'source', 'subject', 'revision', 'artifact', 'limitations', 'check', 'subject-file'],
       evaluate: ['record', 'json', 'status', 'reason', 'evidence'],
       revise: ['record', 'json', 'text', 'remove', 'reason', 'evidence'],
@@ -148,15 +148,21 @@ async function main(argv: string[]): Promise<void> {
     if (command === 'add') {
       let inputs: ReturnType<typeof parseEntryBatch>;
       if (values.stdin === true) {
-        if (positionals.length !== 1 || values.text !== undefined || values.reason !== undefined || values.question !== undefined) {
-          throw usageError('Use add --stdin alone for input, without a kind, --text, --reason, or --question.');
+        if (positionals.length !== 1 || values.text !== undefined || values.reason !== undefined || values.question !== undefined || values.criterion !== undefined) {
+          throw usageError('Use add --stdin alone for input, without a kind, --text, --reason, --question, or --criterion.');
         }
         inputs = await readBatch();
       } else {
         if (positionals.length !== 2) throw usageError('Use add <kind> --text <text>, or add --stdin.');
+        const criterionIds = stringList(values.criterion);
+        if (criterionIds.length > 1) throw usageError('Use at most one --criterion with add.');
         const input: Record<string, unknown> = { kind: positionals[1], text: values.text };
         if (values.reason !== undefined) input.reason = values.reason;
         if (values.question !== undefined) input.questionId = values.question;
+        if (criterionIds.length > 0) {
+          if (positionals[1] !== 'scenario') throw usageError('--criterion is only valid for add scenario.');
+          input.criterionId = criterionIds[0];
+        }
         inputs = [parseEntryInput(input)];
       }
       const added = updateRecord(location, (record) => {
@@ -226,11 +232,13 @@ async function main(argv: string[]): Promise<void> {
         throw usageError('Provide the selected executable and up to 99 arguments after --.');
       }
       const modeOptions = mode === 'run'
-        ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'case']
-        : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref', 'case'];
+        ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'case', 'expect']
+        : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref', 'case', 'expect'];
       for (const option of usedOptions) if (!modeOptions.includes(option)) throw usageError(`Option --${option} is not valid for check ${mode}.`);
       const caseType = values.case === undefined ? null : values.case;
       if (caseType !== null && !CASE_TYPES.includes(caseType as CaseType)) throw usageError('--case must be positive, negative, boundary, or regression.');
+      const expect = values.expect === undefined ? null : values.expect;
+      if (expect !== null && expect !== 'pass' && expect !== 'fail') throw usageError('--expect must be pass or fail.');
       const revision = optionalText(values.revision, '--revision');
       const dirtyValue = values.dirty ?? 'unknown';
       if (dirtyValue !== 'clean' && dirtyValue !== 'dirty' && dirtyValue !== 'unknown') throw usageError('--dirty must be clean, dirty, or unknown.');
@@ -251,7 +259,7 @@ async function main(argv: string[]): Promise<void> {
         argv: selectedArgv, cwd, criterionIds: stringList(values.criterion), revision,
         dirty: dirtyValue as DirtyState,
         provenance: (values.revision !== undefined || values.dirty !== undefined ? 'reported' : 'unknown') as 'reported' | 'unknown',
-        timeoutMs, captureOutput, outputRef, caseType: caseType as CaseType | null,
+        timeoutMs, captureOutput, outputRef, caseType: caseType as CaseType | null, expect: expect as Expectation | null,
       };
       if (mode === 'record') {
         if (values.status !== 'skipped' && values.status !== 'inconclusive') throw usageError('A reported check must have --status skipped or inconclusive.');

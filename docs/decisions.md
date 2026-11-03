@@ -40,6 +40,14 @@
   documentation, deployment, observed outcome) are recorded separately from
   activities; one goal is never inferred from another or from a recorded
   statement.
+- **Optional practices (TDD/BDD).** TDD and BDD are optional recorded practices
+  over the same evidence model — no separate engine and no mandatory process.
+  `practice` entries record the chosen practice (exactly `tdd` or `bdd`);
+  `scenario` entries record BDD-style statements with an optional link to one
+  existing criterion; checks carry an optional caller expectation (`expect:
+  pass|fail`) whose match with the recorded outcome is reported as
+  `expectationMet` — a recorded comparison, not a judgment that the expectation
+  was correct.
 - **Verification provenance and freshness.** Revision and dirty state are
   caller-reported or unknown; the CLI does not run Git implicitly. An optional
   SHA-256 snapshot covers one explicitly selected regular file at evidence
@@ -63,12 +71,14 @@
   A revised criterion is unverified for its new version until explicitly
   evaluated; earlier assessments remain available. These links do not establish
   file inputs, relevance, or adequacy, and are separate from acceptance.
-- **Record evolution.** Schemas 1, 2, and 3 are read without writes and upgraded
-  atomically to schema 4 on the next successful mutation. Schema 3 added explicit
-  baseline/revision history and version context; schema 4 adds claims, check
-  case labels, recorded acceptances, and delivery targets. Older binaries reject
-  schema 4 rather than silently dropping its fields. Historical prefixes are not
-  tamper-proof against direct edits.
+- **Record evolution.** Schemas 1, 2, 3, and 4 are read without writes and
+  upgraded atomically to schema 5 on the next successful mutation. Schema 3 added
+  explicit baseline/revision history and version context; schema 4 adds claims,
+  check case labels, recorded acceptances, and delivery targets; schema 5 adds
+  optional practice and scenario entries (entries gain a `criterionId` field)
+  and a per-check caller expectation (`expect`). Older binaries reject newer
+  schemas rather than silently dropping their fields. Historical prefixes are
+  not tamper-proof against direct edits.
 - **Independent adoption.** The small fixture has its own project configuration
   and no SYNTH-internal imports. Installed-package tests copy it outside this
   checkout. A separate remote repository is not created by the prototype.

@@ -1,4 +1,4 @@
-import type { CriterionView, WorkRecord, WorkRecordV4 } from './domain.js';
+import type { CriterionView, WorkRecord, WorkRecordV5 } from './domain.js';
 import type { BaselineComparison } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
@@ -55,6 +55,8 @@ export interface QaCoverage {
   evaluations: number;
   findings: { driftAssessments: number; unintendedOrUncertain: number };
   risks: { openGaps: number; unknownSelectedFiles: number | null };
+  practices: string[];
+  scenarios: { total: number; linked: number };
 }
 
 export interface AcceptanceInput {
@@ -98,7 +100,7 @@ export function validateReview(value: Record<string, unknown>, gapIds: Set<strin
   }
 }
 
-export function addAcceptance(record: WorkRecord, input: AcceptanceInput): { record: WorkRecordV4; acceptance: Acceptance } {
+export function addAcceptance(record: WorkRecord, input: AcceptanceInput): { record: WorkRecordV5; acceptance: Acceptance } {
   const next = upgradeRecord(record);
   const gaps = new Set(next.entries.filter((entry) => entry.kind === 'gap').map((entry) => entry.id));
   if (input.kind === 'initial' && next.acceptances.length > 0) {
@@ -127,7 +129,7 @@ export function addAcceptance(record: WorkRecord, input: AcceptanceInput): { rec
   return { record: { ...next, acceptances: [...next.acceptances, acceptance] }, acceptance };
 }
 
-export function addDeliveryTarget(record: WorkRecord, input: DeliveryTargetInput): { record: WorkRecordV4; target: DeliveryTarget } {
+export function addDeliveryTarget(record: WorkRecord, input: DeliveryTargetInput): { record: WorkRecordV5; target: DeliveryTarget } {
   const next = upgradeRecord(record);
   const deliveryTarget: DeliveryTarget = {
     id: nextId('T', next.deliveryTargets),
@@ -141,7 +143,7 @@ export function addDeliveryTarget(record: WorkRecord, input: DeliveryTargetInput
 }
 
 /** Compare the acceptance snapshot counts with the current record; no timestamps are trusted. */
-export function acceptanceView(state: WorkRecordV4): AcceptanceView | null {
+export function acceptanceView(state: WorkRecordV5): AcceptanceView | null {
   const latest = state.acceptances.at(-1);
   if (!latest) return null;
   const changedSince: string[] = [];
@@ -156,7 +158,7 @@ export function acceptanceView(state: WorkRecordV4): AcceptanceView | null {
 }
 
 /** Coverage summary: what was checked, with what evidence, plus findings and residual risks. */
-export function computeQaCoverage(state: WorkRecordV4, criteria: readonly CriterionView[], comparison: BaselineComparison | null): QaCoverage {
+export function computeQaCoverage(state: WorkRecordV5, criteria: readonly CriterionView[], comparison: BaselineComparison | null): QaCoverage {
   const byStatus: Record<string, number> = {};
   const byCase: Record<string, number> = {};
   let pending = 0;
@@ -184,6 +186,11 @@ export function computeQaCoverage(state: WorkRecordV4, criteria: readonly Criter
     risks: {
       openGaps: state.entries.filter((entry) => entry.kind === 'gap').length,
       unknownSelectedFiles: comparison ? Object.values(comparison.areas).reduce((sum, area) => sum + area.unknownFileCount, 0) : null,
+    },
+    practices: state.entries.filter((entry) => entry.kind === 'practice').map((entry) => entry.text),
+    scenarios: {
+      total: state.entries.filter((entry) => entry.kind === 'scenario').length,
+      linked: state.entries.filter((entry) => entry.kind === 'scenario' && entry.criterionId !== null).length,
     },
   };
 }

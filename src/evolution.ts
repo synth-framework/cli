@@ -1,16 +1,27 @@
-import type { WorkRecord, WorkRecordV4 } from './domain.js';
+import type { WorkRecord, WorkRecordV5 } from './domain.js';
 
 /** Upgrade only for a mutation. Legacy criteria could not be revised, so their
  * evidence and evaluations refer to the original criterion versions. Schema 4
- * adds claims, check case labels, recorded acceptances, and delivery targets;
- * older binaries reject schema 4 rather than dropping its fields. */
-export function upgradeRecord(record: WorkRecord): WorkRecordV4 {
-  if (record.schemaVersion === 4) return record;
+ * adds claims, check case labels, recorded acceptances, and delivery targets.
+ * Schema 5 adds optional practice and scenario entries (a scenario may link one
+ * criterion) and a per-check caller expectation; older binaries reject schema 5
+ * rather than dropping its fields. */
+export function upgradeRecord(record: WorkRecord): WorkRecordV5 {
+  if (record.schemaVersion === 5) return record;
+  if (record.schemaVersion === 4) {
+    return {
+      ...record,
+      schemaVersion: 5,
+      entries: record.entries.map((entry) => ({ ...entry, criterionId: entry.criterionId ?? null })),
+      checks: record.checks.map((check) => ({ ...check, expect: check.expect ?? null })),
+    };
+  }
   if (record.schemaVersion === 3) {
     return {
       ...record,
-      schemaVersion: 4,
-      checks: record.checks.map((check) => ({ ...check, caseType: check.caseType ?? null })),
+      schemaVersion: 5,
+      entries: record.entries.map((entry) => ({ ...entry, criterionId: null })),
+      checks: record.checks.map((check) => ({ ...check, caseType: check.caseType ?? null, expect: null })),
       acceptances: [],
       deliveryTargets: [],
     };
@@ -21,8 +32,9 @@ export function upgradeRecord(record: WorkRecord): WorkRecordV4 {
   return {
     ...record,
     ...verification,
-    schemaVersion: 4,
-    checks: verification.checks.map((check) => ({ ...check, caseType: null })),
+    schemaVersion: 5,
+    entries: record.entries.map((entry) => ({ ...entry, criterionId: null })),
+    checks: verification.checks.map((check) => ({ ...check, caseType: null, expect: null })),
     revisions: [],
     baselines: [],
     driftAssessments: [],

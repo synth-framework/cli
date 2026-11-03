@@ -70,3 +70,10 @@ The comment is an inline review comment (not the review body)
 The suggestion block is the last element in the body
 The existing_code (the lines being replaced) matches the diff exactly — whitespace included
 If your agent generates a suggestion that doesn't match the current line content, GitHub silently drops the button and shows it as plain code. That's a non-issue (it degrades gracefully), but worth knowing so you don't think the feature is broken.
+
+## Backlog conventions
+
+- The authoritative backlog is GitHub Issues; slices are milestones. BACKLOG.md is only a link index — no automatic synchronization.
+- Invariant: exactly one open issue carries `priority:next` — the next item to work.
+- When the labeled issue is started or closed, move `priority:next` to the next open issue: the lowest-numbered open issue in the earliest open milestone, excluding the final-stage milestone (platform validation is deferred there by decision — see docs/decisions.md).
+- An item that is deferred to the final stage (e.g. macOS/Windows validation) belongs in the final-stage milestone, not under `priority:next`.
