@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,6 +136,32 @@ test('S4-02: scenarios are entries with an optional validated criterion link', (
     assert.match(human.stdout, /Scenarios \(BDD-style statements/);
     assert.match(human.stdout, /Criterion: C1/);
     assert.match(human.stdout, /Criterion: not linked/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4-02: a batch may create a criterion and a scenario linking it in the same call', () => {
+  const { dir, record } = setup();
+  try {
+    init(record);
+    // The link target is created earlier in the same batch, like question -> answer.
+    const batch = ok(run(record, ['add', '--stdin', '--json'], { input: JSON.stringify([
+      { kind: 'criterion', text: 'Titles are truncated to 40 characters' },
+      { kind: 'scenario', text: 'Given a 50-character title, when saved, then only 40 characters remain', criterionId: 'C1' },
+    ]) }), 'add');
+    assert.equal(batch.entries[0].id, 'C1');
+    assert.equal(batch.entries[1].criterionId, 'C1');
+    const h = handoff(record);
+    assert.equal(h.scenarios.length, 1);
+    assert.equal(h.scenarios[0].criterionId, 'C1');
+    assert.deepEqual(h.qaCoverage.scenarios, { total: 1, linked: 1 });
+    // An unknown criterion in a batch still fails without writing.
+    const before = JSON.parse(readFileSync(record, 'utf8'));
+    fail(run(record, ['add', '--stdin', '--json'], { input: JSON.stringify([
+      { kind: 'scenario', text: 'Given x, when y, then z', criterionId: 'C404' },
+    ]) }), 2, 'USAGE_ERROR');
+    assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), before);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

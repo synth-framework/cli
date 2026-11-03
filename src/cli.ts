@@ -149,7 +149,7 @@ async function main(argv: string[]): Promise<void> {
       let inputs: ReturnType<typeof parseEntryBatch>;
       if (values.stdin === true) {
         if (positionals.length !== 1 || values.text !== undefined || values.reason !== undefined || values.question !== undefined || values.criterion !== undefined) {
-          throw usageError('Use add --stdin alone for input, without a kind, --text, --reason, or --question.');
+          throw usageError('Use add --stdin alone for input, without a kind, --text, --reason, --question, or --criterion.');
         }
         inputs = await readBatch();
       } else {
