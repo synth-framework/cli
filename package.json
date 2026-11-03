@@ -16,7 +16,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/installed.test.mjs"
+    "test": "npm run build && node --test test/baseline.test.mjs"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

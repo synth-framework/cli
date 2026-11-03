@@ -184,7 +184,7 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
     if (raw.target === 'intention') {
       if (!nonblank(raw.text)) corrupt('the intention cannot be removed');
     } else {
-      const target = entries.slice(0, raw.entryCount as number).find((entry) => entry.id === raw.target);
+      const target = entries.find((entry) => entry.id === raw.target);
       if (!target || !revisableKinds.includes(target.kind) || !(raw.text === null || nonblank(raw.text))) corrupt('invalid revision target or text');
     }
     if (!optionalText(raw.reason) || !references(raw.evidenceIds, new Set(evidence.slice(0, raw.evidenceCount as number).map((item) => item.id))) || !timestamp(raw.createdAt)) corrupt('invalid revision details');
