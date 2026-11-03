@@ -70,8 +70,10 @@ function indented(text: string, indentation = '    '): string {
   return text.replace(/\r?\n/g, `\n${indentation}`);
 }
 
-function renderEntries(title: string, entries: readonly Entry[], options: { decisions?: boolean } = {}): string {
-  if (entries.length === 0) return `${title}: not recorded.`;
+function renderEntries(title: string, entries: readonly Entry[], options: { decisions?: boolean; removed?: number } = {}): string {
+  if (entries.length === 0) {
+    return options.removed ? `${title}: none active; ${options.removed} removed (listed under removed entries).` : `${title}: not recorded.`;
+  }
   const lines = [`${title}:`];
   for (const entry of entries) {
     const revised = 'active' in entry && 'revisionId' in entry && 'originalText' in entry ? entry as Entry & { active: boolean; revisionId: string | null; originalText: string } : null;
@@ -83,8 +85,10 @@ function renderEntries(title: string, entries: readonly Entry[], options: { deci
   return lines.join('\n');
 }
 
-function renderCriteria(criteria: readonly CriterionView[]): string {
-  if (criteria.length === 0) return 'Acceptance criteria: not recorded.';
+function renderCriteria(criteria: readonly CriterionView[], removed = 0): string {
+  if (criteria.length === 0) {
+    return removed > 0 ? `Acceptance criteria: none active; ${removed} removed (listed under removed entries).` : 'Acceptance criteria: not recorded.';
+  }
   const lines = ['Acceptance criteria (evaluations are recorded assessments):'];
   for (const item of criteria) {
     lines.push(`  ${item.id} [${item.active ? '' : 'removed; '}${item.evaluation}] (evidence freshness: ${item.freshness}): ${indented(item.text)}`);
@@ -186,15 +190,25 @@ export function renderHandoff(location: string, handoff: Handoff): string {
   ].join('\n');
   const removed = handoff.removedEntries.length === 0 ? [] : [
     'Removed entries (retained in history, not current):',
-    ...handoff.removedEntries.map((item) => `  ${item.id} [removed${item.revisionId ? ` by ${item.revisionId}` : ''}]: ${indented(item.text)}`),
+    ...handoff.removedEntries.flatMap((item) => [
+      `  ${item.id} [removed${item.revisionId ? ` by ${item.revisionId}` : ''}]: ${indented(item.text)}`,
+      `    Original: ${indented(item.originalText, '      ')}`,
+      ...(item.reason === null ? [] : [`    Entry reason: ${indented(item.reason, '      ')}`]),
+    ]),
   ];
+  const removedByKind = new Map<string, number>();
+  for (const item of handoff.removedEntries) removedByKind.set(item.kind, (removedByKind.get(item.kind) ?? 0) + 1);
   return [
     'SYNTH handoff', `Record: ${location}`, `Original intention: ${indented(handoff.originalIntention, '  ')}`,
     `Current intention${handoff.intentionRevisionId ? ` (${handoff.intentionRevisionId})` : ''}: ${indented(handoff.currentIntention, '  ')}`,
     'Entries are recorded statements; only explicit revisions change current text, and history is retained.',
-    renderEntries('Desired outcome', handoff.outcomes), renderEntries('Scope', handoff.scope),
-    renderEntries('Constraints', handoff.constraints), renderEntries('Non-goals', handoff.nonGoals),
-    renderCriteria(handoff.criteria), renderEntries('Verification plan', handoff.verification), questions.join('\n'), renderEntries('Assumptions', handoff.assumptions),
+    renderEntries('Desired outcome', handoff.outcomes, { removed: removedByKind.get('outcome') ?? 0 }),
+    renderEntries('Scope', handoff.scope, { removed: removedByKind.get('scope') ?? 0 }),
+    renderEntries('Constraints', handoff.constraints, { removed: removedByKind.get('constraint') ?? 0 }),
+    renderEntries('Non-goals', handoff.nonGoals, { removed: removedByKind.get('non-goal') ?? 0 }),
+    renderCriteria(handoff.criteria, removedByKind.get('criterion') ?? 0),
+    renderEntries('Verification plan', handoff.verification, { removed: removedByKind.get('verification') ?? 0 }),
+    questions.join('\n'), renderEntries('Assumptions', handoff.assumptions),
     renderEntries('Plan notes (not automatically superseded)', handoff.plan),
     renderEntries('Work updates (recorded statements, not verified)', handoff.updates),
     renderEntries('Work references (not inspected)', handoff.workReferences),

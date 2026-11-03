@@ -380,13 +380,15 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const decisions = select('decision');
   const gaps = select('gap');
   const nextActions = select('next');
+  // Missing context means never recorded; a category whose entries were all
+  // explicitly removed is recorded-but-removed, not missing.
   const groups: [string, readonly unknown[]][] = [
-    ['outcomes', outcomes.filter((item) => item.active)],
-    ['scope', scope.filter((item) => item.active)],
-    ['constraints', constraints.filter((item) => item.active)],
-    ['nonGoals', nonGoals.filter((item) => item.active)],
-    ['criteria', criteria.filter((item) => item.active)],
-    ['verification', verification.filter((item) => item.active)],
+    ['outcomes', outcomes],
+    ['scope', scope],
+    ['constraints', constraints],
+    ['nonGoals', nonGoals],
+    ['criteria', criteria],
+    ['verification', verification],
     ['questions', questions], ['assumptions', assumptions], ['plan', plan],
     ['updates', updates], ['workReferences', workReferences], ['decisions', decisions],
     ['gaps', gaps], ['nextActions', nextActions],

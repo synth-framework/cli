@@ -1,10 +1,11 @@
 // baseline.test.mjs
 import test from 'node:test';
 import { strict as assert } from 'assert';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { compareBaselines, validateBaseline } from '../dist/baseline.js';
 import { makeHandoff } from '../dist/domain.js';
 import { snapshotFile } from '../dist/fingerprint.js';
@@ -175,8 +176,8 @@ await test('makeHandoff keeps v1 arrays active-only and lists removed entries se
   assert.equal(removed.revisionId, 'R1');
 });
 
-// A FIFO swapped in for a selected file must not block fingerprinting.
-await test('snapshotFile rejects a non-regular file without blocking', { skip: process.platform !== 'linux' ? 'requires Linux mkfifo' : false }, async () => {
+// A FIFO present at lstat is rejected without blocking (POSIX mkfifo).
+await test('snapshotFile rejects a FIFO without blocking', { skip: process.platform === 'win32' ? 'POSIX only (mkfifo)' : false }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'synth-fifo-'));
   try {
     const fifo = join(dir, 'pipe');
@@ -185,6 +186,108 @@ await test('snapshotFile rejects a non-regular file without blocking', { skip: p
     assert.equal(snapshot.state, 'unavailable');
     assert.equal(snapshot.digest, null);
     assert.match(snapshot.reason ?? '', /not a regular file|file changed while opening|could not be fingerprinted/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The racy window is lstat(regular) -> open(FIFO): a swap in between must be
+// reported as changed-while-opening, never block. The child snapshots in a
+// tight loop while the parent alternates regular file <-> FIFO; a regression
+// that drops O_NONBLOCK hangs the child and fails the timeout.
+await test('snapshotFile does not block when a regular file is swapped for a FIFO between lstat and open', { skip: process.platform === 'win32' ? 'POSIX only (mkfifo)' : false }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'synth-race-'));
+  try {
+    const target = join(dir, 'input.bin');
+    const stop = join(dir, 'stop');
+    writeFileSync(target, 'regular content');
+    const childFile = join(dir, 'child.mjs');
+    const fingerprintUrl = pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'fingerprint.js')).href;
+    writeFileSync(childFile, `
+      import { snapshotFile } from ${JSON.stringify(fingerprintUrl)};
+      import { existsSync } from 'node:fs';
+      const counts = {};
+      while (!existsSync(process.env.RACE_STOP)) {
+        const s = snapshotFile(process.env.RACE_TARGET);
+        const key = s.state + ':' + (s.reason ?? 'captured');
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+      process.stdout.write(JSON.stringify(counts));
+    `);
+    const child = spawn(process.execPath, [childFile], {
+      env: { ...process.env, RACE_TARGET: target, RACE_STOP: stop },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    const killer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    try {
+      const tmpFifo = join(dir, 'fifo.tmp');
+      for (let i = 0; i < 300; i++) {
+        try { unlinkSync(target); } catch { /* already a FIFO */ }
+        writeFileSync(target, 'regular content');
+        // Widen the lstat->open window so the child's lstat is very likely to
+        // land on the regular file and its open to land on the FIFO.
+        const until = Date.now() + 1;
+        while (Date.now() < until) { /* spin ~1ms */ }
+        execFileSync('mkfifo', [tmpFifo]);
+        renameSync(tmpFifo, target);
+      }
+      writeFileSync(stop, 'stop');
+      const result = await Promise.race([
+        exited,
+        new Promise((resolve) => setTimeout(() => resolve({ code: null, signal: 'TIMEOUT' }), 25_000)),
+      ]);
+      if (result.signal === 'TIMEOUT') {
+        child.kill('SIGKILL');
+        assert.fail(`snapshotFile blocked on a FIFO swapped in after lstat; stderr=${err}`);
+      }
+      assert.equal(result.code, 0, `child failed; stderr=${err}`);
+      const counts = JSON.parse(out);
+      assert.ok((counts['captured:captured'] ?? 0) > 0, `no successful captures: ${out}`);
+      assert.ok(
+        (counts['unavailable:file changed while opening'] ?? 0) > 0,
+        `the lstat->open swap window was never exercised: ${out}`,
+      );
+    } finally {
+      clearTimeout(killer);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// At the CLI level, capturing a baseline that selects a FIFO must finish (not
+// hang while holding the record lock) and leave the record writable.
+await test('baseline capture with a FIFO selected completes and releases the record lock', { skip: process.platform === 'win32' ? 'POSIX only (mkfifo)' : false }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'synth-cli-fifo-'));
+  try {
+    const cli = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js');
+    const record = join(dir, 'work.json');
+    const init = spawnSync(process.execPath, [cli, '--record', record, 'init', '--intent', 'Race capture', '--json'], { encoding: 'utf8', timeout: 15_000 });
+    assert.equal(init.error, undefined);
+    assert.equal(init.status, 0, init.stderr);
+    const target = join(dir, 'input.bin');
+    writeFileSync(target, 'regular content');
+    execFileSync('mkfifo', [join(dir, 'fifo.tmp')]);
+    renameSync(join(dir, 'fifo.tmp'), target);
+    const capture = spawnSync(
+      process.execPath,
+      [cli, '--record', record, 'baseline', 'capture', '--file', 'input.bin', '--json'],
+      { cwd: dir, encoding: 'utf8', timeout: 15_000 },
+    );
+    assert.equal(capture.error, undefined, 'capture blocked on the FIFO and hit the timeout');
+    assert.equal(capture.status, 0, capture.stderr);
+    const baseline = JSON.parse(capture.stdout).data.baseline;
+    assert.equal(baseline.files[0].state, 'unavailable');
+    // The writer lock was released: a later mutation succeeds.
+    const add = spawnSync(process.execPath, [cli, '--record', record, 'add', 'update', '--text', 'after capture', '--json'], { encoding: 'utf8', timeout: 15_000 });
+    assert.equal(add.error, undefined);
+    assert.equal(add.status, 0, add.stderr);
+    assert.equal(existsSync(`${record}.lock`), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

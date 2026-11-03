@@ -152,7 +152,7 @@ function jsonSuccess(result, command) {
   assert.equal(result.status, 0, `expected success; stdout=${result.stdout}\nstderr=${result.stderr}`);
   assert.equal(result.stderr, '');
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.outputVersion, 1);
+  assert.ok(payload.outputVersion === 1 || payload.outputVersion === 2, `unexpected outputVersion ${payload.outputVersion}`);
   assert.equal(payload.ok, true);
   if (command) assert.equal(payload.command, command);
   return payload.data;
@@ -418,19 +418,24 @@ test('a fresh process can choose and record a next action using only the handoff
     function call(args) {
       const result = spawnSync(cli, args, { encoding: 'utf8' });
       if (result.status !== 0) throw new Error(result.stderr);
-      return JSON.parse(result.stdout).data;
+      return JSON.parse(result.stdout);
     }
-    const h = call(['handoff', '--json']).handoff;
+    const envelope = call(['handoff', '--json']);
+    const h = envelope.data.handoff;
     const question = h.questions.find(item => item.state === 'unanswered');
     if (!question) throw new Error('No unanswered question in the handoff');
     const next = 'Clarify ' + question.id + ': ' + question.text;
     call(['add', 'next', '--text', next, '--json']);
-    process.stdout.write(JSON.stringify({ intention: h.originalIntention, criteria: h.criteria.map(item => item.id), gap: h.gaps[0].text, next }));
+    // A version-aware reader honors the envelope version: at 2 the intention was
+    // revised and originalIntention is stale, so use currentIntention instead.
+    const intention = envelope.outputVersion >= 2 ? h.currentIntention : h.originalIntention;
+    process.stdout.write(JSON.stringify({ version: envelope.outputVersion, intention, criteria: h.criteria.map(item => item.id), gap: h.gaps[0].text, next }));
   `;
   const reader = spawnSync(process.execPath, ['-e', readerScript], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
   assert.equal(reader.error, undefined);
   assert.equal(reader.status, 0, reader.stderr);
   assert.deepEqual(JSON.parse(reader.stdout), {
+    version: 1,
     intention: 'Make title behavior clear',
     criteria: ['C1'],
     gap: 'Behavior is not verified',
@@ -1367,6 +1372,24 @@ test('revisions and verification notes are optional and do not require a baselin
   assert.match(human.stdout, /Baselines: not recorded/);
 });
 
+test('a revised intention bumps the handoff/status envelope to outputVersion 2 for v1 consumers', () => {
+  const dir = fixture();
+  initialize(dir, 'Original objective');
+  let payload = JSON.parse(run(dir, ['handoff', '--json']).stdout);
+  assert.equal(payload.outputVersion, 1);
+  assert.equal(payload.data.handoff.originalIntention, 'Original objective');
+  assert.equal(payload.data.handoff.currentIntention, 'Original objective');
+  jsonSuccess(run(dir, ['revise', 'intention', '--text', 'Current objective', '--reason', 'Narrowed', '--json']), 'revise');
+  payload = JSON.parse(run(dir, ['handoff', '--json']).stdout);
+  assert.equal(payload.outputVersion, 2);
+  assert.equal(payload.data.handoff.originalIntention, 'Original objective');
+  assert.equal(payload.data.handoff.currentIntention, 'Current objective');
+  assert.equal(payload.data.handoff.intentionRevisionId, 'R1');
+  const statusPayload = JSON.parse(run(dir, ['status', '--json']).stdout);
+  assert.equal(statusPayload.outputVersion, 2);
+  assert.equal(statusPayload.data.handoff.currentIntention, 'Current objective');
+});
+
 test('criterion revisions preserve checks and evidence without applying older evaluations to new versions', () => {
   const dir = fixture();
   initialize(dir);
@@ -1397,7 +1420,8 @@ test('criterion revisions preserve checks and evidence without applying older ev
   assert.equal(handoff.criteria.length, 0);
   assert.ok(handoff.removedEntries.some((item) => item.id === 'C1' && item.active === false));
   assert.equal(handoff.evaluations.at(-1).criterionContext.state, 'inactive');
-  assert.ok(handoff.missingContext.includes('criteria'));
+  // C1 was recorded (then removed), so the criteria category is not "missing".
+  assert.ok(!handoff.missingContext.includes('criteria'));
   jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Original criterion', '--reason', 'Restored', '--json']), 'revise');
   handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
   assert.equal(handoff.criteria[0].active, true);

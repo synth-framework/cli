@@ -46,10 +46,10 @@ export function snapshotFile(inputPath: string): FileSnapshot {
     // open; the fstat below then rejects the non-regular descriptor before any read.
     descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
     const opened = fstatSync(descriptor, { bigint: true });
-    if (!opened.isFile()) return unavailable('unavailable', 'not a regular file');
     if (opened.dev !== before.dev || opened.ino !== before.ino) {
       return unavailable('unavailable', 'file changed while opening');
     }
+    if (!opened.isFile()) return unavailable('unavailable', 'not a regular file');
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(64 * 1024);
     let total = 0;
