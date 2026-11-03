@@ -7,12 +7,14 @@ Usage:
   synth init --intent <text> [--record <path>] [--json]
   synth add <kind> --text <text> [--reason <text>] [--record <path>] [--json]
   synth add answer --question <question-id> --text <text> [--reason <text>] [--record <path>] [--json]
+  synth add practice --text tdd|bdd [--reason <text>] [--record <path>] [--json]
+  synth add scenario --text <given/when/then text> [--criterion <id>] [--reason <text>] [--record <path>] [--json]
   synth add --stdin [--record <path>] [--json]
-  synth check run [--criterion <id>] [--case positive|negative|boundary|regression]
+  synth check run [--criterion <id>] [--case positive|negative|boundary|regression] [--expect pass|fail]
     [--cwd <path>] [--timeout-ms <ms>]
     [--revision <text>] [--dirty clean|dirty|unknown]
     (--capture-output | --output-ref <reference>) [--record <path>] [--json] -- <executable> [arguments...]
-  synth check record [--criterion <id>] [--case positive|negative|boundary|regression]
+  synth check record [--criterion <id>] [--case positive|negative|boundary|regression] [--expect pass|fail]
     --status skipped|inconclusive --reason <text>
     [--cwd <path>] [--revision <text>] [--dirty clean|dirty|unknown] [--output-ref <reference>]
     [--record <path>] [--json] -- <executable> [arguments...]
@@ -36,10 +38,11 @@ Usage:
 
 Entry kinds:
   outcome, scope, constraint, non-goal, criterion, verification, question,
-  answer, assumption, plan, update, work-ref, decision, gap, next, claim
+  answer, assumption, plan, update, work-ref, decision, gap, next, claim,
+  practice, scenario
 
 --stdin reads a non-empty JSON array of entries; a batch is limited to 100
-entries and 1 MiB of UTF-8. An answer requires questionId.
+entries and 1 MiB of UTF-8. An answer requires questionId; a scenario may add criterionId.
 
 Checks run only the executable and arguments explicitly supplied after --;
 there is no implicit shell. Choose --capture-output or --output-ref before a
@@ -69,6 +72,14 @@ Delivery targets (deliver) are goals — code, PR handoff, artifact,
 documentation, deployment, observed outcome — recorded separately from
 activities; one is never inferred from another.
 
+Optional practices reuse the same evidence model; there is no separate TDD or
+BDD engine and neither practice is mandatory. "add practice" records an optional
+tdd or bdd choice for the work item. "add scenario" records a BDD-style
+given/when/then statement, optionally linked to one criterion. "check --expect"
+records the caller's expected outcome (pass or fail, e.g. TDD red/green); the
+handoff reports whether the recorded result met the expectation — a recorded
+comparison, not a judgment that the expectation was correct.
+
 Only an intention is required to start. Missing context is shown, not treated
 as a gate. With no --record, the current directory's .synth/work.json is used;
 SYNTH does not search parent directories. See the README for safety limits,
@@ -78,7 +89,7 @@ const labels: Record<string, string> = {
   outcomes: 'desired outcome', scope: 'scope', constraints: 'constraints', nonGoals: 'non-goals',
   criteria: 'criteria', verification: 'verification plan', questions: 'questions', assumptions: 'assumptions', plan: 'plan',
   updates: 'work updates', workReferences: 'work references', decisions: 'decisions',
-  gaps: 'gaps', nextActions: 'next actions', claims: 'claims',
+  gaps: 'gaps', nextActions: 'next actions', claims: 'claims', practices: 'practices', scenarios: 'scenarios',
 };
 
 function indented(text: string, indentation = '    '): string {
@@ -119,7 +130,8 @@ function renderChecks(handoff: Handoff): string {
   if (handoff.checks.length === 0) return 'Checks: not recorded.';
   const lines = ['Checks (a result is not a criterion evaluation):'];
   for (const check of handoff.checks) {
-    lines.push(`  ${check.id} [${check.status}; ${check.invocation}${check.caseType ? `; case: ${check.caseType}` : ''}]: ${JSON.stringify(check.argv)} in ${check.cwd}`);
+    const expectation = check.expect === null ? '' : `; expect: ${check.expect}${check.expectationMet === null ? '' : check.expectationMet ? '; expectation met' : '; expectation not met'}`;
+    lines.push(`  ${check.id} [${check.status}; ${check.invocation}${check.caseType ? `; case: ${check.caseType}` : ''}${expectation}]: ${JSON.stringify(check.argv)} in ${check.cwd}`);
     lines.push(`    Criteria: ${check.criterionIds.join(', ') || 'not linked'}; requested: ${check.requestedAt}; started: ${check.startedAt ?? 'unknown'}; ended: ${check.endedAt ?? 'unknown'}`);
     if (check.criterionContexts.length > 0) lines.push(`    Criterion versions at request: ${check.criterionContexts.map((context) => `${context.criterionId} ${context.state}`).join(', ')}.`);
     lines.push(`    Revision: ${check.revision ?? 'unknown'}; dirty: ${check.dirty}; provenance: ${check.provenance}`);
@@ -185,6 +197,7 @@ function renderQaCoverage(handoff: Handoff): string {
     `  Criteria: ${qa.criteria.active} active of ${qa.criteria.total} recorded; ${qa.criteria.evaluated} evaluated, ${qa.criteria.unverified} unverified.`,
     `  Checks: ${qa.checks.total} recorded${qa.checks.pending > 0 ? ` (${qa.checks.pending} pending)` : ''}${statusParts ? `; by status: ${statusParts}` : ''}${caseParts ? `; by case: ${caseParts}` : ''}.`,
     `  Evidence: ${qa.evidence}; evaluations: ${qa.evaluations}.`,
+    `  Practices (optional): ${qa.practices.join(', ') || 'none recorded'}; scenarios: ${qa.scenarios.total} recorded, ${qa.scenarios.linked} linked to a criterion.`,
     `  Findings: ${qa.findings.driftAssessments} drift assessment(s), ${qa.findings.unintendedOrUncertain} unintended/uncertain.`,
     `  Residual risks: ${qa.risks.openGaps} recorded gap(s); unknown selected files: ${unknownFiles}.`,
   ].join('\n');
@@ -270,6 +283,11 @@ export function renderHandoff(location: string, handoff: Handoff): string {
     renderEntries('Gap notes (not automatically resolved)', handoff.gaps),
     renderEntries('Next-action notes (not automatically completed)', handoff.nextActions),
     renderEntries('Claims (corrections retained in revision history; detecting a change is not judging it)', handoff.claims, { removed: removedByKind.get('claim') ?? 0 }),
+    renderEntries('Practices (optional recorded choice; not a mandatory process)', handoff.practices),
+    handoff.scenarios.length === 0 ? 'Scenarios (BDD-style statements): not recorded.' : [
+      'Scenarios (BDD-style statements; linked criterion shown):',
+      ...handoff.scenarios.map((item) => `  ${item.id}: ${indented(item.text)}${item.reason !== null ? `\n    Reason: ${indented(item.reason, '      ')}` : ''}\n    Criterion: ${item.criterionId ?? 'not linked'}.`),
+    ].join('\n'),
     ...removed,
     renderChecks(handoff), renderEvidence(handoff), evaluationHistory,
     revisions, baselines,
@@ -305,6 +323,7 @@ export function renderStatus(location: string, handoff: Handoff): string {
     'A recorded response does not establish that a question is resolved.',
     `Gaps: ${handoff.gaps.length} recorded (absence of a recorded gap does not prove there are none).`,
     `Claims: ${handoff.claims.length} active recorded (corrections retained in revision history).`,
+    `Practices: ${handoff.practices.map((item) => item.text).join(', ') || 'not recorded'}; scenarios: ${handoff.scenarios.length} recorded (${handoff.scenarios.filter((item) => item.criterionId !== null).length} linked to a criterion).`,
     handoff.acceptance === null
       ? 'Acceptance: not recorded.'
       : `Acceptance: ${handoff.acceptance.id} [${handoff.acceptance.kind}] is ${handoff.acceptance.state}${handoff.acceptance.state === 'reassessment_needed' ? `; changed since: ${handoff.acceptance.changedSince.join(', ')}` : ''}; known gaps: ${handoff.acceptance.knownGapIds.join(', ') || 'none'}.`,
