@@ -2,6 +2,7 @@ import type { Entry, EntryKind, WorkRecord, WorkRecordV4 } from './domain.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, snapshotFile, type FileSnapshot } from './fingerprint.js';
+import { keys, nextId, nonblank, object, optionalText, references, timestamp, validCount, validId } from './validate.js';
 
 export const MAX_BASELINE_FILES = 20;
 export type BaselineArea = 'intention' | 'scope' | 'criteria' | 'verification';
@@ -124,42 +125,9 @@ export interface DriftAssessmentView extends DriftAssessment {
   evidenceAddedSince: string[];
 }
 
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  return Object.keys(value).length === expected.length && Object.keys(value).every((key) => expected.includes(key));
-}
-function nonblank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-function optionalText(value: unknown): value is string | null { return value === null || nonblank(value); }
-function timestamp(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const time = Date.parse(value);
-  return Number.isFinite(time) && new Date(time).toISOString() === value;
-}
-function validId(value: unknown, prefix: string): value is string {
-  if (typeof value !== 'string' || !value.startsWith(prefix)) return false;
-  const suffix = value.slice(prefix.length);
-  return /^[1-9][0-9]*$/.test(suffix) && Number.isSafeInteger(Number(suffix));
-}
-function validCount(value: unknown, maximum: number): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= maximum;
-}
-function references(value: unknown, allowed: Set<string>): value is string[] {
-  return Array.isArray(value) && value.length <= 100 && value.every((id) => typeof id === 'string' && allowed.has(id)) &&
-    new Set(value).size === value.length;
-}
 function filesValid(value: unknown): value is FileSnapshot[] {
   return Array.isArray(value) && value.length <= MAX_BASELINE_FILES && value.every(isFileSnapshot) &&
     new Set(value.map((item) => item.path)).size === value.length;
-}
-function nextId(prefix: string, items: readonly { id: string }[]): string {
-  let max = 0;
-  for (const item of items) max = Math.max(max, Number(item.id.slice(prefix.length)));
-  if (!Number.isSafeInteger(max + 1)) throw usageError(`No more ${prefix} IDs are available.`);
-  return `${prefix}${max + 1}`;
 }
 
 /** Validate the history and all its references before any record can be rewritten. */

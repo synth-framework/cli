@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { appendEntries, decodeRecord, makeHandoff, newRecord } from '../dist/domain.js';
 import { addAcceptance, addDeliveryTarget } from '../dist/review.js';
+import { addCheck, completeCheck, OUTPUT_LIMIT_BYTES } from '../dist/verification.js';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cli = join(repository, 'dist', 'cli.js');
@@ -239,8 +240,17 @@ test('schema 4 records validate, upgrade from schema 3, and reject unknown versi
   assert.deepEqual(upgraded.record.deliveryTargets, []);
 
   // Acceptance referencing a missing gap is rejected at validation time.
-  const withAcceptance = { ...upgraded.record, acceptances: [{ id: 'AC1', kind: 'initial', statement: 's', knownGapIds: ['G404'], recordedAt: new Date().toISOString(), entryCount: 2, revisionCount: 0, baselineCount: 0, checkCount: 0, evidenceCount: 0, evaluationCount: 0 }] };
+  const withAcceptance = { ...upgraded.record, acceptances: [{ id: 'AC1', kind: 'initial', statement: 's', knownGapIds: ['G404'], recordedAt: new Date().toISOString(), entryCount: 2, revisionCount: 0, baselineCount: 0, checkCount: 0, completedCheckCount: 0, evidenceCount: 0, evaluationCount: 0 }] };
   assert.throws(() => decodeRecord(Buffer.from(JSON.stringify(withAcceptance)), 'unit.json'), /invalid acceptance/);
+
+  // Tampered snapshot counters beyond the recorded history are rejected (review finding 1).
+  const accepted = addAcceptance(upgraded.record, { kind: 'initial', statement: 'ok', knownGapIds: ['G1'] }).record;
+  const tampered = JSON.parse(JSON.stringify(accepted));
+  tampered.acceptances[0].entryCount = 999_999;
+  assert.throws(() => decodeRecord(Buffer.from(JSON.stringify(tampered)), 'unit.json'), /invalid acceptance counts/);
+  const tamperedTarget = JSON.parse(JSON.stringify(accepted));
+  tamperedTarget.deliveryTargets = [{ id: 'T1', target: 'code', text: 't', reason: null, recordedAt: new Date().toISOString(), entryCount: 999_999 }];
+  assert.throws(() => decodeRecord(Buffer.from(JSON.stringify(tamperedTarget)), 'unit.json'), /invalid delivery target/);
 
   // Domain-level helpers agree with the CLI shape.
   const record = addAcceptance(upgraded.record, { kind: 'initial', statement: 'ok', knownGapIds: ['G1'] }).record;
@@ -252,4 +262,35 @@ test('schema 4 records validate, upgrade from schema 3, and reject unknown versi
   assert.equal(h.deliveryTargets.length, 1);
   assert.equal(h.qaCoverage.risks.openGaps, 1);
   assert.ok(existsSync(cli));
+});
+
+test('an acceptance recorded while a check is pending flags reassessment when the outcome lands (review finding 2)', () => {
+  const withCriterion = appendEntries(newRecord('Pending-window check'), [{ kind: 'criterion', text: 'c', reason: null, questionId: null }]).record;
+  const pending = addCheck(withCriterion, {
+    argv: ['node', '-e', ''], cwd: '/', criterionIds: ['C1'], revision: null, dirty: 'unknown',
+    provenance: 'unknown', timeoutMs: 1000, captureOutput: true, outputRef: null, caseType: null,
+  });
+  const pendingRecord = pending.record;
+  assert.equal(pending.check.status, 'pending');
+  const accepted = addAcceptance(pendingRecord, { kind: 'initial', statement: 'accepted during the run', knownGapIds: [] }).record;
+  assert.equal(makeHandoff(accepted).acceptance?.state, 'current', 'a pending check has no outcome yet, so nothing changed');
+  const stream = { bytes: 0, text: '', truncated: false };
+  const completed = {
+    ...pending.check,
+    status: 'failed',
+    startedAt: new Date().toISOString(),
+    endedAt: new Date().toISOString(),
+    exitCode: 1,
+    signal: null,
+    reason: 'command failed',
+    output: { captured: true, limitBytesPerStream: OUTPUT_LIMIT_BYTES, encoding: 'utf8-lossy', stdout: stream, stderr: stream },
+  };
+  const after = completeCheck(accepted, completed);
+  const view = makeHandoff(after).acceptance;
+  assert.equal(view?.state, 'reassessment_needed', 'the pending -> failed rewrite must invalidate a current acceptance');
+  assert.ok(view.changedSince.includes('checks'));
+  // And the tampered completedCheckCount is rejected on decode.
+  const tampered = JSON.parse(JSON.stringify(after));
+  tampered.acceptances[0].completedCheckCount = 999;
+  assert.throws(() => decodeRecord(Buffer.from(JSON.stringify(tampered)), 'unit.json'), /invalid acceptance counts/);
 });

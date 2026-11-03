@@ -201,7 +201,8 @@ proof a human was present, not a verification, and not delegation; recording it
 deliberately does **not** depend on freshness. `synth accept --reassess ...`
 records a new acceptance after relevant changes. The handoff and status report
 whether the latest acceptance is `current` or `reassessment_needed`, listing
-what changed since (entries, revisions, baselines, checks, evidence,
+what changed since (entries, revisions, baselines, checks — including a check
+that only just completed, since `completeCheck` rewrites in place — evidence,
 evaluations) by comparing recorded counts — not timestamps.
 
 `synth deliver --target code|pr-handoff|artifact|documentation|deployment|observed-outcome --text '...'`

@@ -4,6 +4,7 @@ import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, type FileSnapshot, type Freshness } from './fingerprint.js';
 import { CASE_TYPES, type CaseType } from './review.js';
+import { keys, nextId, nonblank, object, optionalText, optionalTimestamp, references, timestamp, validId } from './validate.js';
 
 export const OUTPUT_LIMIT_BYTES = 16 * 1024;
 export const MAX_TIMEOUT_MS = 300_000;
@@ -126,33 +127,6 @@ export interface EvaluationInput {
   evidenceIds: string[];
 }
 
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  return Object.keys(value).length === expected.length && Object.keys(value).every((key) => expected.includes(key));
-}
-function nonblank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-function optionalText(value: unknown): value is string | null {
-  return value === null || nonblank(value);
-}
-function timestamp(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const time = Date.parse(value);
-  return Number.isFinite(time) && new Date(time).toISOString() === value;
-}
-function optionalTimestamp(value: unknown): boolean { return value === null || timestamp(value); }
-function validId(value: unknown, prefix: string): value is string {
-  if (typeof value !== 'string' || !value.startsWith(prefix)) return false;
-  const suffix = value.slice(prefix.length);
-  return /^[1-9][0-9]*$/.test(suffix) && Number.isSafeInteger(Number(suffix));
-}
-function references(value: unknown, allowed: Set<string>, required: boolean): value is string[] {
-  return Array.isArray(value) && (!required || value.length > 0) && value.length <= 100 &&
-    value.every((id) => typeof id === 'string' && allowed.has(id)) && new Set(value).size === value.length;
-}
 function validStream(value: unknown, captured: boolean): boolean {
   if (!object(value) || !keys(value, ['bytes', 'text', 'truncated'])) return false;
   if (!Number.isSafeInteger(value.bytes) || (value.bytes as number) < 0 || typeof value.truncated !== 'boolean') return false;
@@ -222,13 +196,6 @@ export function validateVerification(value: Record<string, unknown>, criterionId
     if (!references(raw.evidenceIds, new Set(evidence.keys()), raw.verdict !== 'unverified')) corrupt('invalid evaluation evidence');
     evaluationIds.add(raw.id as string);
   }
-}
-
-function nextId(prefix: string, items: readonly { id: string }[]): string {
-  let max = 0;
-  for (const item of items) max = Math.max(max, Number(item.id.slice(prefix.length)));
-  if (!Number.isSafeInteger(max + 1)) throw usageError(`No more ${prefix} IDs are available.`);
-  return `${prefix}${max + 1}`;
 }
 
 function requireCriteria(record: WorkRecord, ids: string[], required = false): void {
