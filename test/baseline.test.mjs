@@ -239,7 +239,7 @@ await test('snapshotFile does not block when a regular file is swapped for a FIF
       writeFileSync(stop, 'stop');
       const result = await Promise.race([
         exited,
-        new Promise((resolve) => setTimeout(() => resolve({ code: null, signal: 'TIMEOUT' }), 25_000)),
+        new Promise((resolve) => setTimeout(() => resolve({ code: null, signal: 'TIMEOUT' }), 25_000).unref()),
       ]);
       if (result.signal === 'TIMEOUT') {
         child.kill('SIGKILL');
