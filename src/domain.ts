@@ -7,6 +7,8 @@ import {
   type EvaluationContext, type EvidenceContext, type ObservationCache, type RevisedEntry, type Revision,
 } from './baseline.js';
 import { validateVerification, type Check, type CheckView, type CriterionContextView, type Evidence, type EvidenceView, type Evaluation, type EvaluationView, type Verdict } from './verification.js';
+import { validateReview, type Acceptance, type AcceptanceView, type DeliveryTarget, type QaCoverage, acceptanceView, computeQaCoverage } from './review.js';
+import { hasOnlyKeys, nonblank, object, timestamp } from './validate.js';
 
 export const KIND_PREFIX = {
   outcome: 'O',
@@ -24,6 +26,7 @@ export const KIND_PREFIX = {
   decision: 'D',
   gap: 'G',
   next: 'N',
+  claim: 'CL',
 } as const;
 
 export type EntryKind = keyof typeof KIND_PREFIX;
@@ -67,7 +70,13 @@ export interface WorkRecordV3 extends RecordBase {
   evaluationContexts: EvaluationContext[];
 }
 
-export type WorkRecord = WorkRecordV1 | WorkRecordV2 | WorkRecordV3;
+export interface WorkRecordV4 extends Omit<WorkRecordV3, 'schemaVersion'> {
+  schemaVersion: 4;
+  acceptances: Acceptance[];
+  deliveryTargets: DeliveryTarget[];
+}
+
+export type WorkRecord = WorkRecordV1 | WorkRecordV2 | WorkRecordV3 | WorkRecordV4;
 
 export interface EntryInput {
   kind: EntryKind;
@@ -76,26 +85,8 @@ export interface EntryInput {
   questionId: string | null;
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isNonblank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
 function isKind(value: unknown): value is EntryKind {
   return typeof value === 'string' && Object.hasOwn(KIND_PREFIX, value);
-}
-
-function isTimestamp(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  const time = Date.parse(value);
-  return Number.isFinite(time) && new Date(time).toISOString() === value;
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).every((key) => keys.includes(key));
 }
 
 function validId(id: unknown, kind: EntryKind): id is string {
@@ -129,12 +120,12 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
   } catch {
     return corrupt('invalid JSON');
   }
-  if (!isObject(value)) return corrupt('expected an object');
+  if (!object(value)) return corrupt('expected an object');
   if (!Number.isInteger(value.schemaVersion)) return corrupt('missing or invalid schemaVersion');
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3) {
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4) {
     throw new SynthError(
       'UNSUPPORTED_SCHEMA',
-      `Work record "${location}" has schema version ${String(value.schemaVersion)}; this CLI supports versions 1, 2, and 3. It was not changed.`,
+      `Work record "${location}" has schema version ${String(value.schemaVersion)}; this CLI supports versions 1, 2, 3, and 4. It was not changed.`,
       3,
     );
   }
@@ -142,26 +133,31 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     ? ['schemaVersion', 'originalIntention', 'createdAt', 'entries']
     : value.schemaVersion === 2
       ? ['schemaVersion', 'originalIntention', 'createdAt', 'entries', 'checks', 'evidence', 'evaluations']
-      : ['schemaVersion', 'originalIntention', 'createdAt', 'entries', 'checks', 'evidence', 'evaluations', 'revisions', 'baselines', 'driftAssessments', 'checkContexts', 'evidenceContexts', 'evaluationContexts'];
+      : value.schemaVersion === 3
+        ? ['schemaVersion', 'originalIntention', 'createdAt', 'entries', 'checks', 'evidence', 'evaluations', 'revisions', 'baselines', 'driftAssessments', 'checkContexts', 'evidenceContexts', 'evaluationContexts']
+        : ['schemaVersion', 'originalIntention', 'createdAt', 'entries', 'checks', 'evidence', 'evaluations', 'revisions', 'baselines', 'driftAssessments', 'checkContexts', 'evidenceContexts', 'evaluationContexts', 'acceptances', 'deliveryTargets'];
   if (!hasOnlyKeys(value, recordKeys)) return corrupt('unrecognized record fields');
-  if (!isNonblank(value.originalIntention)) return corrupt('missing original intention');
-  if (!isTimestamp(value.createdAt)) return corrupt('invalid creation time');
+  if (!nonblank(value.originalIntention)) return corrupt('missing original intention');
+  if (!timestamp(value.createdAt)) return corrupt('invalid creation time');
   if (!Array.isArray(value.entries)) return corrupt('entries must be an array');
 
   const ids = new Set<string>();
   const questions = new Set<string>();
   const criteria = new Set<string>();
+  const gaps = new Set<string>();
   const answerTargets: string[] = [];
   for (const item of value.entries) {
-    if (!isObject(item)) return corrupt('an entry is not an object');
+    if (!object(item)) return corrupt('an entry is not an object');
     if (!hasOnlyKeys(item, ['id', 'kind', 'text', 'reason', 'questionId', 'createdAt'])) {
       return corrupt('unrecognized entry fields');
     }
-    if (!isKind(item.kind) || (value.schemaVersion !== 3 && item.kind === 'verification')) return corrupt('invalid entry kind');
+    if (!isKind(item.kind)) return corrupt('invalid entry kind');
+    if (value.schemaVersion !== 3 && value.schemaVersion !== 4 && item.kind === 'verification') return corrupt('invalid entry kind');
+    if (value.schemaVersion !== 4 && item.kind === 'claim') return corrupt('claims require schema version 4');
     if (!validId(item.id, item.kind) || ids.has(item.id)) return corrupt('invalid or duplicate entry ID');
-    if (!isNonblank(item.text)) return corrupt('entry text is missing');
-    if (item.reason !== null && !isNonblank(item.reason)) return corrupt('invalid entry reason');
-    if (!isTimestamp(item.createdAt)) return corrupt('invalid entry time');
+    if (!nonblank(item.text)) return corrupt('entry text is missing');
+    if (item.reason !== null && !nonblank(item.reason)) return corrupt('invalid entry reason');
+    if (!timestamp(item.createdAt)) return corrupt('invalid entry time');
     if (item.kind === 'answer') {
       if (typeof item.questionId !== 'string') return corrupt('answer is missing its question ID');
       answerTargets.push(item.questionId);
@@ -171,17 +167,19 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     ids.add(item.id);
     if (item.kind === 'question') questions.add(item.id);
     if (item.kind === 'criterion') criteria.add(item.id);
+    if (item.kind === 'gap') gaps.add(item.id);
   }
   if (answerTargets.some((id) => !questions.has(id))) return corrupt('answer refers to a missing question');
-  if (value.schemaVersion === 2 || value.schemaVersion === 3) validateVerification(value, criteria, corrupt);
-  if (value.schemaVersion === 3) validateBaseline(value, corrupt);
+  if (value.schemaVersion === 2 || value.schemaVersion === 3 || value.schemaVersion === 4) validateVerification(value, criteria, corrupt, value.schemaVersion);
+  if (value.schemaVersion === 3 || value.schemaVersion === 4) validateBaseline(value, corrupt);
+  if (value.schemaVersion === 4) validateReview(value, gaps, corrupt);
   return value as unknown as WorkRecord;
 }
 
 export function newRecord(intention: unknown): WorkRecord {
-  if (!isNonblank(intention)) throw usageError('Provide a non-empty intention with --intent.');
+  if (!nonblank(intention)) throw usageError('Provide a non-empty intention with --intent.');
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     originalIntention: intention,
     createdAt: new Date().toISOString(),
     entries: [],
@@ -194,23 +192,25 @@ export function newRecord(intention: unknown): WorkRecord {
     checkContexts: [],
     evidenceContexts: [],
     evaluationContexts: [],
+    acceptances: [],
+    deliveryTargets: [],
   };
 }
 
 export function parseEntryInput(value: unknown, label = 'entry'): EntryInput {
-  if (!isObject(value)) throw usageError(`${label} must be a JSON object.`);
+  if (!object(value)) throw usageError(`${label} must be a JSON object.`);
   if (!hasOnlyKeys(value, ['kind', 'text', 'reason', 'questionId'])) {
     throw usageError(`${label} contains an unsupported field. Allowed fields: kind, text, reason, questionId.`);
   }
   if (!isKind(value.kind)) {
     throw usageError(`${label} has an unknown kind. Run synth --help for the supported kinds.`);
   }
-  if (!isNonblank(value.text)) throw usageError(`${label} needs non-empty text.`);
-  if (value.reason !== undefined && value.reason !== null && !isNonblank(value.reason)) {
+  if (!nonblank(value.text)) throw usageError(`${label} needs non-empty text.`);
+  if (value.reason !== undefined && value.reason !== null && !nonblank(value.reason)) {
     throw usageError(`${label} reason must be non-empty text when provided.`);
   }
   if (value.kind === 'answer') {
-    if (!isNonblank(value.questionId)) throw usageError(`${label} needs a questionId.`);
+    if (!nonblank(value.questionId)) throw usageError(`${label} needs a questionId.`);
   } else if (value.questionId !== undefined && value.questionId !== null) {
     throw usageError(`${label} can have a questionId only when its kind is answer.`);
   }
@@ -276,7 +276,7 @@ export interface CriterionView extends RevisedEntry {
 }
 
 export interface Handoff {
-  recordVersion: 1 | 2 | 3;
+  recordVersion: 1 | 2 | 3 | 4;
   originalIntention: string;
   currentIntention: string;
   intentionRevisionId: string | null;
@@ -299,6 +299,7 @@ export interface Handoff {
   decisions: Entry[];
   gaps: Entry[];
   nextActions: Entry[];
+  claims: RevisedEntry[];
   checks: CheckView[];
   evidence: EvidenceView[];
   evaluations: EvaluationView[];
@@ -307,6 +308,9 @@ export interface Handoff {
   baselineComparison: BaselineComparison | null;
   previousBaselineComparison: BaselineComparison | null;
   driftAssessments: DriftAssessmentView[];
+  acceptance: AcceptanceView | null;
+  qaCoverage: QaCoverage;
+  deliveryTargets: DeliveryTarget[];
   missingContext: string[];
   capabilities: {
     checks: 'available';
@@ -315,7 +319,7 @@ export interface Handoff {
     revisions: 'available';
     baselines: 'available';
     driftAssessment: 'available';
-    acceptance: 'not_available';
+    acceptance: 'available';
     questionResolution: 'not_available';
     gapAndActionResolution: 'not_available';
     planAndDecisionSupersession: 'not_available';
@@ -380,6 +384,7 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const decisions = select('decision');
   const gaps = select('gap');
   const nextActions = select('next');
+  const claims = revised('claim');
   // Missing context means never recorded; a category whose entries were all
   // explicitly removed is recorded-but-removed, not missing.
   const groups: [string, readonly unknown[]][] = [
@@ -391,7 +396,7 @@ export function makeHandoff(record: WorkRecord): Handoff {
     ['verification', verification],
     ['questions', questions], ['assumptions', assumptions], ['plan', plan],
     ['updates', updates], ['workReferences', workReferences], ['decisions', decisions],
-    ['gaps', gaps], ['nextActions', nextActions],
+    ['gaps', gaps], ['nextActions', nextActions], ['claims', claims],
   ];
   const observations: ObservationCache = new Map();
   const latestBaseline = state.baselines.at(-1);
@@ -400,7 +405,7 @@ export function makeHandoff(record: WorkRecord): Handoff {
   const previousBaselineComparison = latestBaseline && previousBaseline ? compareBaselines(state, previousBaseline.id, latestBaseline.id, observations) : null;
   const intention = currentIntention(state);
   const activeOnly = <T extends { active: boolean }>(items: T[]): T[] => items.filter((item) => item.active);
-  const removedEntries = [...outcomes, ...scope, ...constraints, ...nonGoals, ...criteria, ...verification]
+  const removedEntries = [...outcomes, ...scope, ...constraints, ...nonGoals, ...criteria, ...verification, ...claims]
     .filter((item) => !item.active);
   return {
     recordVersion: record.schemaVersion,
@@ -411,17 +416,20 @@ export function makeHandoff(record: WorkRecord): Handoff {
     outcomes: activeOnly(outcomes), scope: activeOnly(scope), constraints: activeOnly(constraints),
     nonGoals: activeOnly(nonGoals), criteria: activeOnly(criteria), verification: activeOnly(verification),
     removedEntries, questions, assumptions,
-    plan, updates, workReferences, decisions, gaps, nextActions, checks, evidence, evaluations,
+    plan, updates, workReferences, decisions, gaps, nextActions, claims: activeOnly(claims), checks, evidence, evaluations,
     revisions: state.revisions,
     baselines: state.baselines,
     baselineComparison,
     previousBaselineComparison,
     driftAssessments: state.driftAssessments.map((assessment) => assessmentView(state, assessment, observations)),
+    acceptance: acceptanceView(state),
+    qaCoverage: computeQaCoverage(state, criteria, baselineComparison),
+    deliveryTargets: state.deliveryTargets,
     missingContext: groups.filter(([, entries]) => entries.length === 0).map(([name]) => name),
     capabilities: {
       checks: 'available', evidence: 'available', evaluation: 'available',
       revisions: 'available', baselines: 'available', driftAssessment: 'available',
-      acceptance: 'not_available', questionResolution: 'not_available', gapAndActionResolution: 'not_available',
+      acceptance: 'available', questionResolution: 'not_available', gapAndActionResolution: 'not_available',
       planAndDecisionSupersession: 'not_available',
     },
   };

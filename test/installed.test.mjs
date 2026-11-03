@@ -298,7 +298,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
   const dir = fixture();
   assert.equal(existsSync(join(dir, '.git')), false);
   const created = initialize(dir, 'Explore title behavior');
-  assert.equal(created.record.schemaVersion, 3);
+  assert.equal(created.record.schemaVersion, 4);
   assert.equal(created.record.originalIntention, 'Explore title behavior');
   assert.deepEqual(created.record.entries, []);
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
@@ -308,6 +308,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
   assert.ok(handoff.missingContext.includes('scope'));
   assert.ok(handoff.missingContext.includes('criteria'));
   assert.ok(handoff.missingContext.includes('questions'));
+  assert.ok(handoff.missingContext.includes('claims'));
   assert.deepEqual(handoff.capabilities, {
     checks: 'available',
     evidence: 'available',
@@ -315,7 +316,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
     revisions: 'available',
     baselines: 'available',
     driftAssessment: 'available',
-    acceptance: 'not_available',
+    acceptance: 'available',
     questionResolution: 'not_available',
     gapAndActionResolution: 'not_available',
     planAndDecisionSupersession: 'not_available',
@@ -361,7 +362,7 @@ test('separate processes recover, answer, and extend the recorded handoff withou
   assert.equal(first.decisions[1].reason, null);
   assert.equal(first.workReferences[0].text, 'src/title.js');
   assert.equal(first.gaps[0].text, 'No behavior evidence is recorded');
-  assert.deepEqual(first.missingContext, ['verification']);
+  assert.deepEqual(first.missingContext, ['verification', 'claims']);
 
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace', '--reason', 'Developer clarified', '--json']), 'add');
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace, including tabs', '--reason', 'Clarified further', '--json']), 'add');
@@ -574,7 +575,7 @@ test('invalid batches and missing question references never partially modify a r
   assert.equal(readFileSync(file, 'utf8'), original);
 });
 
-test('schema 1 records remain read-only until an atomic schema 3 write', () => {
+test('schema 1 records remain read-only until an atomic schema 4 write', () => {
   const dir = fixture();
   initialize(dir);
   jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Preserve this criterion', '--json']), 'add');
@@ -589,7 +590,7 @@ test('schema 1 records remain read-only until an atomic schema 3 write', () => {
   assert.deepEqual(snapshotTree(dir), before);
   jsonSuccess(run(dir, ['add', 'gap', '--text', 'Evidence is missing', '--json']), 'add');
   const migrated = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.deepEqual(migrated.entries[0], old.entries[0]);
   assert.equal(migrated.entries[1].kind, 'gap');
   assert.deepEqual(migrated.checks, []);
@@ -600,6 +601,8 @@ test('schema 1 records remain read-only until an atomic schema 3 write', () => {
   assert.deepEqual(migrated.checkContexts, []);
   assert.deepEqual(migrated.evidenceContexts, []);
   assert.deepEqual(migrated.evaluationContexts, []);
+  assert.deepEqual(migrated.acceptances, []);
+  assert.deepEqual(migrated.deliveryTargets, []);
 });
 
 test('schema 2 reads are untouched and migration preserves verification against the original criterion', () => {
@@ -623,7 +626,7 @@ test('schema 2 reads are untouched and migration preserves verification against 
   assert.deepEqual(readFileSync(file), original);
   jsonSuccess(run(dir, ['revise', 'C1', '--text', 'New criterion', '--reason', 'Scope changed', '--json']), 'revise');
   const migrated = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.deepEqual(migrated.evidence, old.evidence);
   assert.deepEqual(migrated.evaluations, old.evaluations);
   assert.equal(migrated.evidenceContexts[0].revisionCount, 0);
@@ -834,7 +837,7 @@ test('evidence, evaluations, and freshness remain separate and preserve history'
   assert.equal(notApplicable.verdict, 'not_applicable');
   const inconclusive = jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'inconclusive', '--reason', 'Evidence remains limited', '--evidence', 'E1', '--json']), 'evaluate').evaluation;
   assert.equal(inconclusive.verdict, 'inconclusive');
-  assert.equal(handoff.capabilities.acceptance, 'not_available');
+  assert.equal(handoff.capabilities.acceptance, 'available');
 });
 
 test('unavailable and unselected evidence subjects report unknown freshness', () => {
@@ -965,7 +968,7 @@ test('invalid generated state is rejected before replacing a valid record', () =
   writeFileSync(preload, `
     const original = JSON.stringify;
     JSON.stringify = function(value, ...args) {
-      if (value && value.schemaVersion === 3 && Array.isArray(value.entries)) {
+      if (value && value.schemaVersion === 4 && Array.isArray(value.entries)) {
         return original.call(this, { ...value, wouldBeLost: true }, ...args);
       }
       return original.call(this, value, ...args);
@@ -1206,10 +1209,11 @@ test('interruption before and after replacement preserves schema 1, 2, and 3 rec
     const dir = fixture();
     initialize(dir);
     const file = recordFile(dir);
-    if (schema !== 3) {
+    {
       const current = JSON.parse(readFileSync(file, 'utf8'));
       const old = { schemaVersion: schema, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries };
       if (schema === 2) Object.assign(old, { checks: current.checks, evidence: current.evidence, evaluations: current.evaluations });
+      if (schema === 3) Object.assign(old, { checks: [], evidence: [], evaluations: [], revisions: [], baselines: [], driftAssessments: [], checkContexts: [], evidenceContexts: [], evaluationContexts: [] });
       writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
     }
     const original = readFileSync(file, 'utf8');
@@ -1241,7 +1245,7 @@ test('interruption before and after replacement preserves schema 1, 2, and 3 rec
     const beforeRead = snapshotTree(dir);
     const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
     assert.equal(handoff.gaps.length, phase === 'before' ? 0 : 1);
-    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 3);
+    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 4);
     assert.deepEqual(snapshotTree(dir), beforeRead);
     jsonFailure(run(dir, ['add', 'gap', '--text', 'Blocked by lock', '--json']), 3, 'RECORD_LOCKED');
     assert.ok(existsSync(`${file}.lock`));
@@ -1365,7 +1369,7 @@ test('revisions and verification notes are optional and do not require a baselin
   assert.equal(handoff.baselineComparison, null);
   assert.equal(handoff.verification[0].id, 'VR1');
   assert.equal(handoff.criteria[0].evaluation, 'inconclusive');
-  assert.equal(handoff.capabilities.acceptance, 'not_available');
+  assert.equal(handoff.capabilities.acceptance, 'available');
   const human = run(dir, ['handoff']);
   assert.equal(human.status, 0);
   assert.match(human.stdout, /R1 intention: .*reason: not recorded/);

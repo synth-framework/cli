@@ -10,6 +10,7 @@ import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
 import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Verdict } from './verification.js';
+import { addAcceptance, addDeliveryTarget, CASE_TYPES, DELIVERY_TARGETS, type CaseType, type DeliveryTargetKind } from './review.js';
 
 const CLI_VERSION = '0.1.0';
 const OUTPUT_VERSION = 1;
@@ -82,6 +83,8 @@ async function main(argv: string[]): Promise<void> {
           check: { type: 'string' }, 'subject-file': { type: 'string' },
           remove: { type: 'boolean' }, file: { type: 'string', multiple: true }, 'no-files': { type: 'boolean' },
           to: { type: 'string' }, area: { type: 'string' }, finding: { type: 'string' },
+          case: { type: 'string' }, statement: { type: 'string' }, gap: { type: 'string', multiple: true },
+          reassess: { type: 'boolean' }, target: { type: 'string' },
         },
       });
     } catch (error) {
@@ -93,7 +96,7 @@ async function main(argv: string[]): Promise<void> {
     const usedOptions = new Set<string>();
     for (const token of tokens ?? []) {
       if (token.kind !== 'option') continue;
-      if (usedOptions.has(token.name) && token.name !== 'criterion' && token.name !== 'evidence' && token.name !== 'file') {
+      if (usedOptions.has(token.name) && token.name !== 'criterion' && token.name !== 'evidence' && token.name !== 'file' && token.name !== 'gap') {
         throw usageError(`Option --${token.name} was supplied more than once.`);
       }
       usedOptions.add(token.name);
@@ -118,11 +121,13 @@ async function main(argv: string[]): Promise<void> {
       init: ['intent', 'record', 'json'],
       add: ['text', 'reason', 'question', 'stdin', 'record', 'json'],
       status: ['record', 'json'], handoff: ['record', 'json'],
-      check: ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'status', 'reason'],
+      check: ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'status', 'reason', 'case'],
       evidence: ['record', 'json', 'criterion', 'summary', 'source', 'subject', 'revision', 'artifact', 'limitations', 'check', 'subject-file'],
       evaluate: ['record', 'json', 'status', 'reason', 'evidence'],
       revise: ['record', 'json', 'text', 'remove', 'reason', 'evidence'],
       baseline: ['record', 'json', 'reason', 'file', 'no-files', 'to', 'area', 'finding', 'evidence'],
+      accept: ['record', 'json', 'statement', 'gap', 'reassess'],
+      deliver: ['record', 'json', 'target', 'text', 'reason'],
     };
     const commandOptions = Object.hasOwn(allowed, command) ? allowed[command] : undefined;
     if (commandOptions === undefined) throw usageError(`Unknown command "${command}". Run synth --help for usage.`);
@@ -221,9 +226,11 @@ async function main(argv: string[]): Promise<void> {
         throw usageError('Provide the selected executable and up to 99 arguments after --.');
       }
       const modeOptions = mode === 'run'
-        ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref']
-        : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref'];
+        ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'case']
+        : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref', 'case'];
       for (const option of usedOptions) if (!modeOptions.includes(option)) throw usageError(`Option --${option} is not valid for check ${mode}.`);
+      const caseType = values.case === undefined ? null : values.case;
+      if (caseType !== null && !CASE_TYPES.includes(caseType as CaseType)) throw usageError('--case must be positive, negative, boundary, or regression.');
       const revision = optionalText(values.revision, '--revision');
       const dirtyValue = values.dirty ?? 'unknown';
       if (dirtyValue !== 'clean' && dirtyValue !== 'dirty' && dirtyValue !== 'unknown') throw usageError('--dirty must be clean, dirty, or unknown.');
@@ -244,7 +251,7 @@ async function main(argv: string[]): Promise<void> {
         argv: selectedArgv, cwd, criterionIds: stringList(values.criterion), revision,
         dirty: dirtyValue as DirtyState,
         provenance: (values.revision !== undefined || values.dirty !== undefined ? 'reported' : 'unknown') as 'reported' | 'unknown',
-        timeoutMs, captureOutput, outputRef,
+        timeoutMs, captureOutput, outputRef, caseType: caseType as CaseType | null,
       };
       if (mode === 'record') {
         if (values.status !== 'skipped' && values.status !== 'inconclusive') throw usageError('A reported check must have --status skipped or inconclusive.');
@@ -299,6 +306,37 @@ async function main(argv: string[]): Promise<void> {
         return { record: next.record, result: next.evaluation };
       });
       writeSuccess(command, { recordPath: location, evaluation }, `Recorded evaluation ${evaluation.id} for ${evaluation.criterionId} [${evaluation.verdict}]; this is not acceptance.`);
+      return;
+    }
+    if (command === 'accept') {
+      if (positionals.length !== 1) throw usageError('accept does not accept positional arguments.');
+      const reassess = values.reassess === true;
+      const input = {
+        kind: (reassess ? 'reassessment' : 'initial') as 'initial' | 'reassessment',
+        statement: requiredText(values.statement, '--statement'),
+        knownGapIds: stringList(values.gap),
+      };
+      // Recording acceptance deliberately does not look at freshness: the
+      // one-way rule keeps acceptance recording independent of S3-01 state.
+      const acceptance = updateRecord(location, (record) => {
+        const next = addAcceptance(record, input);
+        return { record: next.record, result: next.acceptance };
+      });
+      writeSuccess(command, { recordPath: location, acceptance }, `Recorded ${acceptance.kind} acceptance ${acceptance.id} with ${acceptance.knownGapIds.length} known gap(s); it is a recorded self-attestation, not proof of presence or verification.`);
+      return;
+    }
+    if (command === 'deliver') {
+      if (positionals.length !== 1) throw usageError('deliver does not accept positional arguments.');
+      const target = values.target;
+      if (typeof target !== 'string' || !DELIVERY_TARGETS.includes(target as DeliveryTargetKind)) {
+        throw usageError('--target must be code, pr-handoff, artifact, documentation, deployment, or observed-outcome.');
+      }
+      const input = { target: target as DeliveryTargetKind, text: requiredText(values.text, '--text'), reason: optionalText(values.reason, '--reason') };
+      const deliveryTarget = updateRecord(location, (record) => {
+        const next = addDeliveryTarget(record, input);
+        return { record: next.record, result: next.target };
+      });
+      writeSuccess(command, { recordPath: location, deliveryTarget }, `Recorded delivery target ${deliveryTarget.id} (${deliveryTarget.target}): ${deliveryTarget.text}. A delivery target is a goal, not evidence of outcome.`);
       return;
     }
     if (positionals.length !== 1) throw usageError(`${command} does not accept positional arguments.`);

@@ -22,9 +22,24 @@
   history, or a guarantee against power loss; directory metadata is not fsynced.
 - **Honest state.** Checks, evidence, criterion evaluations, freshness, and
   acceptance are separate concepts. Checks and evidence do not automatically
-  evaluate criteria, and an assessment is not acceptance. Acceptance remains
-  unavailable; its eventual self-attestation is not proof a human was present.
-  Delegation and reassessment remain open.
+  evaluate criteria, and an assessment is not acceptance. Acceptance is a
+  recorded self-attestation with known gaps (`accept`); it is not proof a human
+  was present, not a verification, and recording it does not depend on
+  freshness. The handoff reports whether the latest acceptance is current or
+  needs reassessment by comparing recorded counts. Delegation remains
+  unavailable.
+- **Claims and corrections.** Consequential claims are entries (`claim` kind).
+  Corrections are explicit revisions that retain the original text; detecting
+  a change is not judging its meaning, and SYNTH does not declare claims true.
+- **QA coverage.** Checks carry an optional case label (positive, negative,
+  boundary, regression). The handoff summarizes criteria, checks by status and
+  case, evidence, evaluations, drift findings, and residual risks (gaps,
+  unknown selected files). Coverage is recorded coverage, not proof of
+  adequacy.
+- **Delivery targets.** Delivery goals (code, PR handoff, artifact,
+  documentation, deployment, observed outcome) are recorded separately from
+  activities; one goal is never inferred from another or from a recorded
+  statement.
 - **Verification provenance and freshness.** Revision and dirty state are
   caller-reported or unknown; the CLI does not run Git implicitly. An optional
   SHA-256 snapshot covers one explicitly selected regular file at evidence
@@ -48,11 +63,12 @@
   A revised criterion is unverified for its new version until explicitly
   evaluated; earlier assessments remain available. These links do not establish
   file inputs, relevance, or adequacy, and are separate from acceptance.
-- **Record evolution.** Schemas 1 and 2 are read without writes and upgraded
-  atomically to schema 3 on the next successful mutation. Schema 3 adds explicit
-  baseline/revision history and version context; older binaries reject it
-  rather than silently dropping fields. Historical prefixes are not tamper-proof
-  against direct edits.
+- **Record evolution.** Schemas 1, 2, and 3 are read without writes and upgraded
+  atomically to schema 4 on the next successful mutation. Schema 3 added explicit
+  baseline/revision history and version context; schema 4 adds claims, check
+  case labels, recorded acceptances, and delivery targets. Older binaries reject
+  schema 4 rather than silently dropping its fields. Historical prefixes are not
+  tamper-proof against direct edits.
 - **Independent adoption.** The small fixture has its own project configuration
   and no SYNTH-internal imports. Installed-package tests copy it outside this
   checkout. A separate remote repository is not created by the prototype.
@@ -63,7 +79,9 @@
 
 ## Open decisions
 
-Broader project-wide and automated semantic drift assessment, the acceptance
-and delegation interface, and actual macOS and representative remote workspace
-results remain open. The developer plans macOS testing after Slice 3. Platform
-targets are not evidence of platform validation.
+Broader project-wide and automated semantic drift assessment, delegation of
+acceptance, and actual macOS and representative remote workspace results remain
+open. By developer decision (2026-11-03), macOS and Windows/WSL2 validation is
+pushed to the final stage (after Slice 4), tracked as backlog issue FV-01 under
+the final-stage milestone; representative remote-workspace results stay with
+S1-05. Platform targets are not evidence of platform validation.
