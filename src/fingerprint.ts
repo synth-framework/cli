@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { hasErrorCode } from './errors.js';
 
 const MAX_SUBJECT_BYTES = 8 * 1024 * 1024;
@@ -16,6 +16,20 @@ export interface FileSnapshot {
 
 export type Freshness = 'matching' | 'changed' | 'unknown';
 
+export function isFileSnapshot(value: unknown): value is FileSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const snapshot = value as Record<string, unknown>;
+  const expected = ['path', 'algorithm', 'digest', 'state', 'reason', 'capturedAt'];
+  if (Object.keys(snapshot).length !== expected.length || !Object.keys(snapshot).every((key) => expected.includes(key))) return false;
+  if (typeof snapshot.path !== 'string' || !isAbsolute(snapshot.path) || snapshot.algorithm !== 'sha256') return false;
+  if (typeof snapshot.capturedAt !== 'string') return false;
+  const time = Date.parse(snapshot.capturedAt);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== snapshot.capturedAt) return false;
+  if (snapshot.state === 'captured') return typeof snapshot.digest === 'string' && /^[0-9a-f]{64}$/.test(snapshot.digest) && snapshot.reason === null;
+  return (snapshot.state === 'missing' || snapshot.state === 'unavailable') && snapshot.digest === null &&
+    typeof snapshot.reason === 'string' && snapshot.reason.trim().length > 0;
+}
+
 /** Hash only a user-selected regular file, without following a final symlink. */
 export function snapshotFile(inputPath: string): FileSnapshot {
   const path = resolve(inputPath);
@@ -28,11 +42,14 @@ export function snapshotFile(inputPath: string): FileSnapshot {
     const before = lstatSync(path, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink()) return unavailable('unavailable', 'not a regular file');
     if (before.size > BigInt(MAX_SUBJECT_BYTES)) return unavailable('unavailable', 'file exceeds the 8 MiB fingerprint limit');
-    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    // O_NONBLOCK keeps a FIFO/device swapped in after lstat from blocking the
+    // open; the fstat below then rejects the non-regular descriptor before any read.
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
     const opened = fstatSync(descriptor, { bigint: true });
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+    if (opened.dev !== before.dev || opened.ino !== before.ino) {
       return unavailable('unavailable', 'file changed while opening');
     }
+    if (!opened.isFile()) return unavailable('unavailable', 'not a regular file');
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(64 * 1024);
     let total = 0;

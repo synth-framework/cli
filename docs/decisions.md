@@ -35,9 +35,24 @@
   opts into bounded capture. The process inherits the environment and is not
   sandboxed. A persisted pending request can outlive an interrupted runner;
   recovery requires inspection, not an automatic retry.
-- **Record evolution.** Schema 1 is read without writes and upgraded atomically
-  on the next successful mutation. Schema 2 adds checks, evidence, and
-  evaluations; older binaries reject it rather than silently dropping fields.
+- **Baselines and revisions.** Baselines are explicit and optional. They refer
+  to append-only intention/context revision prefixes and snapshot up to 20
+  selected regular files independently, not atomically across the project. Later
+  captures inherit the last file selection unless explicitly replaced or
+  cleared. Comparison reports recorded text and selected
+  file changes, not semantic drift or proven evidence impact. A caller can record
+  an area-specific drift assessment; its assessed area and later evidence are
+  visible, without claiming independent review or authenticated authority.
+- **Criterion-version context.** Checks retain linked criterion versions at
+  request time, evidence at recording time, and evaluations at assessment time.
+  A revised criterion is unverified for its new version until explicitly
+  evaluated; earlier assessments remain available. These links do not establish
+  file inputs, relevance, or adequacy, and are separate from acceptance.
+- **Record evolution.** Schemas 1 and 2 are read without writes and upgraded
+  atomically to schema 3 on the next successful mutation. Schema 3 adds explicit
+  baseline/revision history and version context; older binaries reject it
+  rather than silently dropping fields. Historical prefixes are not tamper-proof
+  against direct edits.
 - **Independent adoption.** The small fixture has its own project configuration
   and no SYNTH-internal imports. Installed-package tests copy it outside this
   checkout. A separate remote repository is not created by the prototype.
@@ -48,7 +63,7 @@
 
 ## Open decisions
 
-Broader scope and semantic drift comparison, the acceptance and delegation
-interface, and actual macOS and representative remote workspace results remain
-open. The developer plans macOS testing after Slice 3. Platform targets are not
-evidence of platform validation.
+Broader project-wide and automated semantic drift assessment, the acceptance
+and delegation interface, and actual macOS and representative remote workspace
+results remain open. The developer plans macOS testing after Slice 3. Platform
+targets are not evidence of platform validation.

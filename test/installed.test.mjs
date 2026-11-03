@@ -152,7 +152,7 @@ function jsonSuccess(result, command) {
   assert.equal(result.status, 0, `expected success; stdout=${result.stdout}\nstderr=${result.stderr}`);
   assert.equal(result.stderr, '');
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.outputVersion, 1);
+  assert.ok(payload.outputVersion === 1 || payload.outputVersion === 2, `unexpected outputVersion ${payload.outputVersion}`);
   assert.equal(payload.ok, true);
   if (command) assert.equal(payload.command, command);
   return payload.data;
@@ -298,7 +298,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
   const dir = fixture();
   assert.equal(existsSync(join(dir, '.git')), false);
   const created = initialize(dir, 'Explore title behavior');
-  assert.equal(created.record.schemaVersion, 2);
+  assert.equal(created.record.schemaVersion, 3);
   assert.equal(created.record.originalIntention, 'Explore title behavior');
   assert.deepEqual(created.record.entries, []);
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
@@ -312,6 +312,9 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
     checks: 'available',
     evidence: 'available',
     evaluation: 'available',
+    revisions: 'available',
+    baselines: 'available',
+    driftAssessment: 'available',
     acceptance: 'not_available',
     questionResolution: 'not_available',
     gapAndActionResolution: 'not_available',
@@ -358,7 +361,7 @@ test('separate processes recover, answer, and extend the recorded handoff withou
   assert.equal(first.decisions[1].reason, null);
   assert.equal(first.workReferences[0].text, 'src/title.js');
   assert.equal(first.gaps[0].text, 'No behavior evidence is recorded');
-  assert.deepEqual(first.missingContext, []);
+  assert.deepEqual(first.missingContext, ['verification']);
 
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace', '--reason', 'Developer clarified', '--json']), 'add');
   jsonSuccess(run(dir, ['add', 'answer', '--question', 'Q1', '--text', 'Keep internal whitespace, including tabs', '--reason', 'Clarified further', '--json']), 'add');
@@ -415,19 +418,24 @@ test('a fresh process can choose and record a next action using only the handoff
     function call(args) {
       const result = spawnSync(cli, args, { encoding: 'utf8' });
       if (result.status !== 0) throw new Error(result.stderr);
-      return JSON.parse(result.stdout).data;
+      return JSON.parse(result.stdout);
     }
-    const h = call(['handoff', '--json']).handoff;
+    const envelope = call(['handoff', '--json']);
+    const h = envelope.data.handoff;
     const question = h.questions.find(item => item.state === 'unanswered');
     if (!question) throw new Error('No unanswered question in the handoff');
     const next = 'Clarify ' + question.id + ': ' + question.text;
     call(['add', 'next', '--text', next, '--json']);
-    process.stdout.write(JSON.stringify({ intention: h.originalIntention, criteria: h.criteria.map(item => item.id), gap: h.gaps[0].text, next }));
+    // A version-aware reader honors the envelope version: at 2 the intention was
+    // revised and originalIntention is stale, so use currentIntention instead.
+    const intention = envelope.outputVersion >= 2 ? h.currentIntention : h.originalIntention;
+    process.stdout.write(JSON.stringify({ version: envelope.outputVersion, intention, criteria: h.criteria.map(item => item.id), gap: h.gaps[0].text, next }));
   `;
   const reader = spawnSync(process.execPath, ['-e', readerScript], { cwd: dir, encoding: 'utf8', timeout: 15_000 });
   assert.equal(reader.error, undefined);
   assert.equal(reader.status, 0, reader.stderr);
   assert.deepEqual(JSON.parse(reader.stdout), {
+    version: 1,
     intention: 'Make title behavior clear',
     criteria: ['C1'],
     gap: 'Behavior is not verified',
@@ -566,7 +574,7 @@ test('invalid batches and missing question references never partially modify a r
   assert.equal(readFileSync(file, 'utf8'), original);
 });
 
-test('schema 1 records remain read-only until an atomic schema 2 write', () => {
+test('schema 1 records remain read-only until an atomic schema 3 write', () => {
   const dir = fixture();
   initialize(dir);
   jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Preserve this criterion', '--json']), 'add');
@@ -581,12 +589,49 @@ test('schema 1 records remain read-only until an atomic schema 2 write', () => {
   assert.deepEqual(snapshotTree(dir), before);
   jsonSuccess(run(dir, ['add', 'gap', '--text', 'Evidence is missing', '--json']), 'add');
   const migrated = JSON.parse(readFileSync(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 2);
+  assert.equal(migrated.schemaVersion, 3);
   assert.deepEqual(migrated.entries[0], old.entries[0]);
   assert.equal(migrated.entries[1].kind, 'gap');
   assert.deepEqual(migrated.checks, []);
   assert.deepEqual(migrated.evidence, []);
   assert.deepEqual(migrated.evaluations, []);
+  assert.deepEqual(migrated.revisions, []);
+  assert.deepEqual(migrated.baselines, []);
+  assert.deepEqual(migrated.checkContexts, []);
+  assert.deepEqual(migrated.evidenceContexts, []);
+  assert.deepEqual(migrated.evaluationContexts, []);
+});
+
+test('schema 2 reads are untouched and migration preserves verification against the original criterion', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original criterion', '--json']), 'add');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'A report', '--source', 'Caller', '--subject', 'Original criterion', '--limitations', 'Not independently verified', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Caller assessment', '--evidence', 'E1', '--json']), 'evaluate');
+  const file = recordFile(dir);
+  const current = JSON.parse(readFileSync(file, 'utf8'));
+  const old = { schemaVersion: 2, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries, checks: current.checks, evidence: current.evidence, evaluations: current.evaluations };
+  writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
+  const original = readFileSync(file);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.recordVersion, 2);
+  assert.equal(handoff.criteria[0].evaluation, 'supported');
+  assert.equal(handoff.evidence[0].criterionContexts[0].state, 'current');
+  assert.equal(handoff.baselineComparison, null);
+  assert.deepEqual(readFileSync(file), original);
+  jsonFailure(run(dir, ['revise', 'C404', '--text', 'Invalid target', '--json']), 2, 'USAGE_ERROR');
+  assert.deepEqual(readFileSync(file), original);
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'New criterion', '--reason', 'Scope changed', '--json']), 'revise');
+  const migrated = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(migrated.schemaVersion, 3);
+  assert.deepEqual(migrated.evidence, old.evidence);
+  assert.deepEqual(migrated.evaluations, old.evaluations);
+  assert.equal(migrated.evidenceContexts[0].revisionCount, 0);
+  assert.equal(migrated.evaluationContexts[0].revisionCount, 0);
+  const after = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(after.criteria[0].evaluation, 'unverified');
+  assert.deepEqual(after.criteria[0].priorEvaluationIds, ['V1']);
+  assert.equal(after.evidence[0].criterionContexts[0].state, 'changed');
 });
 
 test('checks and evidence can precede criteria and be explicitly linked later', () => {
@@ -857,6 +902,12 @@ test('a file replaced while fingerprinting does not receive a captured snapshot'
   assert.equal(item.subjectFile.state, 'unavailable');
   assert.equal(item.subjectFile.digest, null);
   assert.equal(jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff.evidence[0].freshness, 'unknown');
+  unlinkSync(backup);
+  writeFileSync(target, 'another original');
+  const baseline = jsonSuccess(runWithPreload(dir, preload, ['baseline', 'capture', '--file', target, '--json']), 'baseline').baseline;
+  assert.equal(baseline.files[0].state, 'unavailable');
+  assert.equal(baseline.files[0].digest, null);
+  assert.equal(jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--json']), 'baseline').comparison.areas.verification.state, 'unknown');
 });
 
 test('a failed final check write leaves a visible pending request', () => {
@@ -874,7 +925,7 @@ test('a failed final check write leaves a visible pending request', () => {
   assert.equal(handoff.criteria[0].evaluation, 'unverified');
 });
 
-test('corrupt schema 2 verification fields and references are not rewritten', () => {
+test('corrupt schema 2 and 3 verification fields and references are not rewritten', () => {
   const dir = fixture();
   initialize(dir);
   jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Claim', '--json']), 'add');
@@ -890,15 +941,18 @@ test('corrupt schema 2 verification fields and references are not rewritten', ()
     (record) => { record.evaluations[0].evidenceIds = []; },
     (record) => { record.evaluations[0].verdict = 'accepted'; },
   ];
-  for (const mutate of mutations) {
-    const damaged = JSON.parse(JSON.stringify(valid));
-    mutate(damaged);
-    const bytes = Buffer.from(JSON.stringify(damaged));
-    writeFileSync(file, bytes);
-    jsonFailure(run(dir, ['status', '--json']), 3, 'RECORD_CORRUPT');
-    jsonFailure(run(dir, ['add', 'gap', '--text', 'Do not replace', '--json']), 3, 'RECORD_CORRUPT');
-    assert.deepEqual(readFileSync(file), bytes);
-    assert.equal(existsSync(`${file}.lock`), false);
+  const v2 = { schemaVersion: 2, originalIntention: valid.originalIntention, createdAt: valid.createdAt, entries: valid.entries, checks: valid.checks, evidence: valid.evidence, evaluations: valid.evaluations };
+  for (const source of [v2, valid]) {
+    for (const mutate of mutations) {
+      const damaged = JSON.parse(JSON.stringify(source));
+      mutate(damaged);
+      const bytes = Buffer.from(JSON.stringify(damaged));
+      writeFileSync(file, bytes);
+      jsonFailure(run(dir, ['status', '--json']), 3, 'RECORD_CORRUPT');
+      jsonFailure(run(dir, ['add', 'gap', '--text', 'Do not replace', '--json']), 3, 'RECORD_CORRUPT');
+      assert.deepEqual(readFileSync(file), bytes);
+      assert.equal(existsSync(`${file}.lock`), false);
+    }
   }
 });
 
@@ -911,7 +965,7 @@ test('invalid generated state is rejected before replacing a valid record', () =
   writeFileSync(preload, `
     const original = JSON.stringify;
     JSON.stringify = function(value, ...args) {
-      if (value && value.schemaVersion === 2 && Array.isArray(value.entries)) {
+      if (value && value.schemaVersion === 3 && Array.isArray(value.entries)) {
         return original.call(this, { ...value, wouldBeLost: true }, ...args);
       }
       return original.call(this, value, ...args);
@@ -960,11 +1014,15 @@ test('a pending check releases the lock and preserves concurrent context writes'
   assert.equal(handoff.checks[0].startedAt, null);
   assert.equal(existsSync(`${recordFile(dir)}.lock`), false);
   jsonSuccess(run(dir, ['add', 'gap', '--text', 'Recorded while a check was running', '--json']), 'add');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--reason', 'During the pending check', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Criterion revised while the check ran', '--json']), 'revise');
   writeFileSync(release, 'stop');
   const result = await closed;
   assert.equal(jsonSuccess(result, 'check').check.status, 'passed');
   handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
   assert.equal(handoff.checks[0].status, 'passed');
+  assert.equal(handoff.checks[0].criterionContexts[0].state, 'changed');
+  assert.equal(handoff.baselineComparison.areas.criteria.state, 'changed');
   assert.equal(handoff.gaps[0].text, 'Recorded while a check was running');
 });
 
@@ -1143,14 +1201,16 @@ test('cooperative concurrent initializations and updates cannot silently overwri
   assert.equal(existsSync(`${recordFile(dir)}.lock`), false);
 });
 
-test('interruption before and after replacement preserves schema 1 and 2 records and a recoverable lock', () => {
-  for (const [schema, phase] of [[1, 'before'], [1, 'after'], [2, 'before'], [2, 'after']]) {
+test('interruption before and after replacement preserves schema 1, 2, and 3 records and a recoverable lock', () => {
+  for (const [schema, phase] of [[1, 'before'], [1, 'after'], [2, 'before'], [2, 'after'], [3, 'before'], [3, 'after']]) {
     const dir = fixture();
     initialize(dir);
     const file = recordFile(dir);
-    if (schema === 1) {
+    if (schema !== 3) {
       const current = JSON.parse(readFileSync(file, 'utf8'));
-      writeFileSync(file, `${JSON.stringify({ schemaVersion: 1, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries }, null, 2)}\n`);
+      const old = { schemaVersion: schema, originalIntention: current.originalIntention, createdAt: current.createdAt, entries: current.entries };
+      if (schema === 2) Object.assign(old, { checks: current.checks, evidence: current.evidence, evaluations: current.evaluations });
+      writeFileSync(file, `${JSON.stringify(old, null, 2)}\n`);
     }
     const original = readFileSync(file, 'utf8');
     const preload = join(dir, 'interrupt-write.cjs');
@@ -1181,7 +1241,7 @@ test('interruption before and after replacement preserves schema 1 and 2 records
     const beforeRead = snapshotTree(dir);
     const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
     assert.equal(handoff.gaps.length, phase === 'before' ? 0 : 1);
-    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 2);
+    assert.equal(handoff.recordVersion, phase === 'before' ? schema : 3);
     assert.deepEqual(snapshotTree(dir), beforeRead);
     jsonFailure(run(dir, ['add', 'gap', '--text', 'Blocked by lock', '--json']), 3, 'RECORD_LOCKED');
     assert.ok(existsSync(`${file}.lock`));
@@ -1219,6 +1279,10 @@ test('core commands do not implicitly launch project scripts, child processes, o
   jsonSuccess(runWithPreload(dir, preload, ['check', 'record', '--criterion', 'C1', '--status', 'skipped', '--reason', 'Not run', '--json', '--', 'node', 'should-not-run.cjs']), 'check');
   jsonSuccess(runWithPreload(dir, preload, ['evidence', 'add', '--criterion', 'C1', '--summary', 'A report', '--source', 'Caller', '--subject', 'Title file', '--limitations', 'Not independently verified', '--subject-file', 'src/title.js', '--json']), 'evidence');
   jsonSuccess(runWithPreload(dir, preload, ['evaluate', 'C1', '--status', 'inconclusive', '--reason', 'No executed check', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(runWithPreload(dir, preload, ['baseline', 'capture', '--file', 'src/title.js', '--json']), 'baseline');
+  jsonSuccess(runWithPreload(dir, preload, ['revise', 'C1', '--text', 'Revised criterion', '--json']), 'revise');
+  jsonSuccess(runWithPreload(dir, preload, ['baseline', 'compare', 'B1', '--json']), 'baseline');
+  jsonSuccess(runWithPreload(dir, preload, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'uncertain', '--reason', 'Needs review', '--evidence', 'E1', '--json']), 'baseline');
   jsonSuccess(runWithPreload(dir, preload, ['status', '--json']), 'status');
   jsonSuccess(runWithPreload(dir, preload, ['handoff', '--json']), 'handoff');
   assert.equal(existsSync(join(dir, 'UNEXPECTED_EXECUTION')), false);
@@ -1255,8 +1319,437 @@ test('the documented agent quick start matches the installed CLI', () => {
     assert.ok(readme.includes(example), `README is missing checked example: ${example}`);
     jsonSuccess(run(dir, args));
   }
-  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
   assert.equal(handoff.checks[0].status, 'passed');
   assert.equal(handoff.criteria[0].evaluation, 'inconclusive');
   assert.equal(handoff.criteria[0].freshness, 'matching');
+  const baselineExamples = [
+    ["synth add scope --text 'Title normalization' --json", ['add', 'scope', '--text', 'Title normalization', '--json']],
+    ["synth add verification --text 'Review the title tests' --json", ['add', 'verification', '--text', 'Review the title tests', '--json']],
+    ["synth baseline capture --file test/title.test.js --reason 'Record the current working context' --json", ['baseline', 'capture', '--file', 'test/title.test.js', '--reason', 'Record the current working context', '--json']],
+    ["synth revise C1 --text 'Title output is a string' --reason 'Example scope change' --evidence E1 --json", ['revise', 'C1', '--text', 'Title output is a string', '--reason', 'Example scope change', '--evidence', 'E1', '--json']],
+    ['synth baseline compare B1 --json', ['baseline', 'compare', 'B1', '--json']],
+    ["synth baseline assess B1 --area criteria --finding uncertain --reason 'Check whether the revised criterion meets intent' --evidence E1 --json", ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'uncertain', '--reason', 'Check whether the revised criterion meets intent', '--evidence', 'E1', '--json']],
+    ["synth baseline capture --reason 'Record the changed working context' --json", ['baseline', 'capture', '--reason', 'Record the changed working context', '--json']],
+    ['synth baseline compare B1 --to B2 --json', ['baseline', 'compare', 'B1', '--to', 'B2', '--json']],
+  ];
+  for (const [example, args] of baselineExamples) {
+    assert.ok(readme.includes(example), `README is missing checked example: ${example}`);
+    jsonSuccess(run(dir, args));
+  }
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].evaluation, 'unverified');
+  assert.deepEqual(handoff.criteria[0].priorEvaluationIds, ['V1']);
+  assert.equal(handoff.previousBaselineComparison.areas.criteria.state, 'changed');
+  assert.equal(handoff.driftAssessments[0].areaBasisState, 'unchanged');
+});
+
+test('revisions and verification notes are optional and do not require a baseline', () => {
+  const dir = fixture();
+  initialize(dir, 'Explore the original intention');
+  const revision = jsonSuccess(run(dir, ['revise', 'intention', '--text', 'A narrower intention', '--json']), 'revise').revision;
+  assert.equal(revision.id, 'R1');
+  assert.equal(revision.reason, null);
+  jsonSuccess(run(dir, ['add', 'update', '--text', 'R1 rationale: clarified after the change', '--json']), 'add');
+  jsonSuccess(run(dir, ['evidence', 'add', '--summary', 'Early observation', '--source', 'Caller', '--subject', 'Exploration', '--limitations', 'No criterion existed yet', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'A later criterion', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'verification', '--text', 'Exercise a boundary', '--json']), 'add');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'inconclusive', '--reason', 'Early observation is limited', '--evidence', 'E1', '--json']), 'evaluate');
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.originalIntention, 'Explore the original intention');
+  assert.equal(handoff.currentIntention, 'A narrower intention');
+  assert.equal(handoff.intentionRevisionId, 'R1');
+  assert.equal(handoff.revisions[0].reason, null);
+  assert.equal(handoff.updates[0].text, 'R1 rationale: clarified after the change');
+  assert.deepEqual(handoff.baselines, []);
+  assert.equal(handoff.baselineComparison, null);
+  assert.equal(handoff.verification[0].id, 'VR1');
+  assert.equal(handoff.criteria[0].evaluation, 'inconclusive');
+  assert.equal(handoff.capabilities.acceptance, 'not_available');
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /R1 intention: .*reason: not recorded/);
+  assert.match(human.stdout, /Baselines: not recorded/);
+});
+
+test('a revised intention bumps the handoff/status envelope to outputVersion 2 for v1 consumers', () => {
+  const dir = fixture();
+  initialize(dir, 'Original objective');
+  let payload = JSON.parse(run(dir, ['handoff', '--json']).stdout);
+  assert.equal(payload.outputVersion, 1);
+  assert.equal(payload.data.handoff.originalIntention, 'Original objective');
+  assert.equal(payload.data.handoff.currentIntention, 'Original objective');
+  jsonSuccess(run(dir, ['revise', 'intention', '--text', 'Current objective', '--reason', 'Narrowed', '--json']), 'revise');
+  payload = JSON.parse(run(dir, ['handoff', '--json']).stdout);
+  assert.equal(payload.outputVersion, 2);
+  assert.equal(payload.data.handoff.originalIntention, 'Original objective');
+  assert.equal(payload.data.handoff.currentIntention, 'Current objective');
+  assert.equal(payload.data.handoff.intentionRevisionId, 'R1');
+  const statusPayload = JSON.parse(run(dir, ['status', '--json']).stdout);
+  assert.equal(statusPayload.outputVersion, 2);
+  assert.equal(statusPayload.data.handoff.currentIntention, 'Current objective');
+});
+
+test('criterion revisions preserve checks and evidence without applying older evaluations to new versions', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original criterion', '--json']), 'add');
+  jsonSuccess(run(dir, ['check', 'record', '--criterion', 'C1', '--status', 'skipped', '--reason', 'Not executed', '--json', '--', 'node', '--test']), 'check');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Caller report', '--source', 'Caller', '--subject', 'Original criterion', '--limitations', 'The selected check was skipped', '--check', 'CHK1', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Caller assessment, not an automated conclusion', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Changed criterion', '--reason', 'Intent changed', '--evidence', 'E1', '--json']), 'revise');
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].id, 'C1');
+  assert.equal(handoff.criteria[0].originalText, 'Original criterion');
+  assert.equal(handoff.criteria[0].text, 'Changed criterion');
+  assert.equal(handoff.criteria[0].evaluation, 'unverified');
+  assert.deepEqual(handoff.criteria[0].priorEvaluationIds, ['V1']);
+  assert.equal(handoff.checks[0].criterionContexts[0].state, 'changed');
+  assert.equal(handoff.evidence[0].criterionContexts[0].state, 'changed');
+  assert.equal(handoff.evaluations[0].criterionContext.state, 'changed');
+  assert.equal(handoff.checks[0].status, 'skipped');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'inconclusive', '--reason', 'Reconsidered for the revised criterion', '--evidence', 'E1', '--json']), 'evaluate');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].evaluation, 'inconclusive');
+  assert.equal(handoff.criteria[0].evaluationId, 'V2');
+  assert.equal(handoff.evidence[0].criterionContexts[0].state, 'changed');
+  jsonSuccess(run(dir, ['revise', 'C1', '--remove', '--reason', 'Temporarily out of scope', '--json']), 'revise');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'unverified', '--reason', 'Historical assessment while inactive', '--json']), 'evaluate');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  // v1-named arrays stay active-only; removed entries are exposed separately.
+  assert.equal(handoff.criteria.length, 0);
+  assert.ok(handoff.removedEntries.some((item) => item.id === 'C1' && item.active === false));
+  assert.equal(handoff.evaluations.at(-1).criterionContext.state, 'inactive');
+  // C1 was recorded (then removed), so the criteria category is not "missing".
+  assert.ok(!handoff.missingContext.includes('criteria'));
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Original criterion', '--reason', 'Restored', '--json']), 'revise');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].active, true);
+  assert.equal(handoff.criteria[0].evaluation, 'unverified');
+  assert.deepEqual(handoff.criteria[0].priorEvaluationIds, ['V1', 'V2', 'V3']);
+  assert.equal(handoff.evaluations.length, 3);
+  assert.equal(handoff.revisions.length, 3);
+});
+
+test('explicit baselines surface intention, scope, criterion, and selected verification changes separately', () => {
+  const dir = fixture();
+  initialize(dir, 'Make title behavior predictable');
+  jsonSuccess(run(dir, ['add', '--stdin', '--json'], { input: JSON.stringify([
+    { kind: 'scope', text: 'Original title scope' },
+    { kind: 'criterion', text: 'Whitespace-only titles are empty' },
+    { kind: 'verification', text: 'Exercise whitespace-only titles' },
+  ]) }), 'add');
+  jsonSuccess(run(dir, ['check', 'record', '--criterion', 'C1', '--status', 'skipped', '--reason', 'Reported only', '--json', '--', 'node', '--test']), 'check');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Prior report', '--source', 'Caller', '--subject', 'Title implementation', '--limitations', 'No boundary check', '--check', 'CHK1', '--subject-file', 'src/title.js', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Caller assessment of original criterion', '--evidence', 'E1', '--json']), 'evaluate');
+  const baseline = jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'test/title.test.js', '--reason', 'Initial working agreement', '--json']), 'baseline').baseline;
+  assert.equal(baseline.id, 'B1');
+  assert.equal(baseline.files[0].state, 'captured');
+  jsonSuccess(run(dir, ['revise', 'intention', '--text', 'Handle title formatting only', '--reason', 'Owner narrowed the work', '--json']), 'revise');
+  jsonSuccess(run(dir, ['revise', 'S1', '--remove', '--reason', 'Scope was replaced', '--evidence', 'E1', '--json']), 'revise');
+  jsonSuccess(run(dir, ['add', 'scope', '--text', 'Narrower title scope', '--reason', 'Replace S1', '--json']), 'add');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'The result is a string', '--reason', 'Narrowed criterion', '--evidence', 'E1', '--json']), 'revise');
+  jsonSuccess(run(dir, ['revise', 'VR1', '--text', 'Exercise an ordinary title only', '--reason', 'Changed verification plan', '--json']), 'revise');
+  const testFile = join(dir, 'test', 'title.test.js');
+  writeFileSync(testFile, `${readFileSync(testFile, 'utf8')}\n// A changed test is not automatically adequate.\n`);
+  const beforeReads = snapshotTree(dir);
+  const result = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--json']), 'baseline').comparison;
+  assert.equal(result.comparedTo, 'current');
+  assert.equal(result.areas.intention.state, 'changed');
+  assert.equal(result.areas.scope.state, 'changed');
+  assert.equal(result.areas.criteria.state, 'changed');
+  assert.equal(result.areas.verification.state, 'changed');
+  assert.equal(result.areas.criteria.changes[0].before.text, 'Whitespace-only titles are empty');
+  assert.equal(result.areas.criteria.changes[0].after.text, 'The result is a string');
+  assert.equal(result.areas.criteria.changes[0].revisions[0].reason, 'Narrowed criterion');
+  assert.deepEqual(result.areas.scope.changes.map((item) => item.change), ['removed', 'added']);
+  assert.equal(result.areas.scope.changes[1].entryReason, 'Replace S1');
+  assert.equal(result.areas.verification.files[0].change, 'changed');
+  assert.equal(result.evidenceImpact, 'not_inferred');
+  const candidate = result.affectedEvidenceCandidates.find((item) => item.evidenceId === 'E1');
+  assert.ok(candidate.basis.includes('declared_by_revision'));
+  assert.ok(candidate.basis.includes('check_inputs_unknown'));
+  const human = run(dir, ['baseline', 'compare', 'B1']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /not a semantic drift judgment/);
+  assert.match(human.stdout, /E1.*candidates|candidates.*E1/);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].evaluation, 'unverified');
+  assert.equal(handoff.evidence[0].freshness, 'matching');
+  assert.equal(handoff.evidence[0].criterionContexts[0].state, 'changed');
+  assert.equal(handoff.baselineComparison.areas.verification.state, 'changed');
+  assert.deepEqual(snapshotTree(dir), beforeReads);
+});
+
+test('baseline recapture retains selected files unless their selection is explicitly changed', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'verification', '--text', 'Title tests', '--json']), 'add');
+  const b1 = jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'src/title.js', '--file', 'test/title.test.js', '--json']), 'baseline').baseline;
+  assert.equal(b1.files.length, 2);
+  const b2 = jsonSuccess(run(dir, ['baseline', 'capture', '--reason', 'Retain selection', '--json']), 'baseline').baseline;
+  assert.deepEqual(b2.files.map((item) => item.path), b1.files.map((item) => item.path));
+  const b3 = jsonSuccess(run(dir, ['baseline', 'capture', '--no-files', '--reason', 'Stop monitoring files', '--json']), 'baseline').baseline;
+  assert.deepEqual(b3.files, []);
+  let comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B2', '--to', 'B3', '--json']), 'baseline').comparison;
+  assert.equal(comparison.areas.verification.state, 'changed');
+  assert.deepEqual(comparison.areas.verification.files.map((item) => item.change), ['selection_removed', 'selection_removed']);
+  comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B3', '--to', 'B1', '--json']), 'baseline').comparison;
+  assert.equal(comparison.direction, 'reverse');
+  assert.deepEqual(comparison.areas.verification.files.map((item) => item.change), ['selection_added', 'selection_added']);
+  const b4 = jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'src/title.js', '--reason', 'Select one path', '--json']), 'baseline').baseline;
+  assert.equal(b4.files.length, 1);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.previousBaselineComparison.baselineId, 'B3');
+  assert.equal(handoff.previousBaselineComparison.comparedTo, 'B4');
+  assert.equal(handoff.previousBaselineComparison.areas.verification.files[0].change, 'selection_added');
+  assert.deepEqual(handoff.baselines.map((item) => item.id), ['B1', 'B2', 'B3', 'B4']);
+});
+
+test('drift assessments are caller-reported and their assessed basis can become changed or unknown', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original behavior', '--json']), 'add');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'test/title.test.js', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'no_concern', '--reason', 'Recorded assessment', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'uncertain', '--reason', 'Need another look', '--json']), 'baseline');
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.deepEqual(handoff.driftAssessments.map((item) => item.areaBasisState), ['unchanged', 'unchanged']);
+  jsonSuccess(run(dir, ['evidence', 'add', '--summary', 'Later observation', '--source', 'Caller', '--subject', 'Possible context', '--limitations', 'Relevance has not been assessed', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['add', 'scope', '--text', 'An unrelated scope note', '--json']), 'add');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.driftAssessments[0].areaBasisState, 'unchanged');
+  assert.deepEqual(handoff.driftAssessments[0].evidenceAddedSince, ['E1']);
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Revised behavior', '--json']), 'revise');
+  const path = join(dir, 'test', 'title.test.js');
+  const original = readFileSync(path);
+  unlinkSync(path);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.deepEqual(handoff.driftAssessments.map((item) => item.areaBasisState), ['changed', 'changed']);
+  assert.equal(handoff.baselineComparison.areas.verification.files[0].change, 'changed');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'uncertain', '--reason', 'The selected file is missing', '--json']), 'baseline');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.driftAssessments[2].areaBasisState, 'unknown');
+  writeFileSync(path, original);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.driftAssessments[1].areaBasisState, 'unchanged');
+  assert.equal(handoff.driftAssessments[2].areaBasisState, 'changed');
+  assert.match(run(dir, ['handoff']).stdout, /caller-reported, not independently verified/);
+});
+
+test('missing, oversized, directory, and symlink baseline files do not become matching evidence', () => {
+  const dir = fixture();
+  initialize(dir);
+  const missing = join(dir, 'missing-test.js');
+  const large = join(dir, 'oversized-test.js');
+  const link = join(dir, 'test-link.js');
+  writeFileSync(large, Buffer.alloc(8 * 1024 * 1024 + 1, 65));
+  symlinkSync(join(dir, 'test', 'title.test.js'), link);
+  const baseline = jsonSuccess(run(dir, ['baseline', 'capture', '--file', missing, '--file', large, '--file', link, '--file', 'test', '--json']), 'baseline').baseline;
+  assert.deepEqual(baseline.files.map((item) => item.state), ['missing', 'unavailable', 'unavailable', 'unavailable']);
+  let comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--json']), 'baseline').comparison;
+  assert.equal(comparison.areas.verification.state, 'unknown');
+  assert.ok(comparison.areas.verification.files.every((item) => item.change === 'unknown'));
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'uncertain', '--reason', 'Inputs unavailable', '--json']), 'baseline');
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.driftAssessments[0].areaBasisState, 'unknown');
+  assert.equal(handoff.driftAssessments[0].areaUnknownFileCount, 4);
+  writeFileSync(missing, 'new input');
+  comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--json']), 'baseline').comparison;
+  assert.equal(comparison.areas.verification.state, 'changed');
+  assert.equal(comparison.areas.verification.files[0].change, 'changed');
+  assert.equal(comparison.areas.verification.files[1].change, 'unknown');
+  assert.equal(comparison.areas.verification.unknownFileCount, 4);
+  assert.match(run(dir, ['status']).stdout, /unknown selected files 4/);
+});
+
+test('invalid revision and baseline requests preserve the record and do not take lasting locks', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'A criterion', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'question', '--text', 'A question', '--json']), 'add');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  const before = snapshotTree(dir);
+  const withoutLockDirectoryTime = (tree) => tree.map((item) => item.path === '.synth' ? { ...item, modified: null } : item);
+  const requests = [
+    ['revise', 'C1'],
+    ['revise', 'C1', '--text', 'Text', '--remove'],
+    ['revise', 'intention', '--remove'],
+    ['revise', 'Q1', '--text', 'Unsupported target'],
+    ['revise', 'C404', '--text', 'Missing target'],
+    ['revise', 'C1', '--text', 'Text', '--evidence', 'E404'],
+    ['baseline', 'capture', '--file', 'src/title.js', '--file', './src/title.js'],
+    ['baseline', 'capture', '--file', 'src/title.js', '--no-files'],
+    ['baseline', 'capture', ...Array.from({ length: 21 }, (_, i) => ['--file', `input-${i}`]).flat()],
+    ['baseline', 'compare', 'B404'],
+    ['baseline', 'compare', 'B1', '--to', 'B404'],
+    ['baseline', 'compare', 'B1', '--file', 'src/title.js'],
+    ['baseline', 'assess', 'B404', '--area', 'scope', '--finding', 'uncertain', '--reason', 'No baseline'],
+    ['baseline', 'assess', 'B1', '--area', 'scope', '--finding', 'invalid', '--reason', 'Invalid finding'],
+    ['baseline', 'assess', 'B1', '--area', 'scope', '--finding', 'uncertain'],
+    ['baseline', 'assess', 'B1', '--area', 'scope', '--finding', 'uncertain', '--reason', 'Invalid link', '--evidence', 'E404'],
+  ];
+  for (const request of requests) {
+    const immediatelyBefore = snapshotTree(dir);
+    jsonFailure(run(dir, [...request, '--json']), 2, 'USAGE_ERROR');
+    const after = snapshotTree(dir);
+    if (request[0] === 'baseline' && request[1] === 'compare') assert.deepEqual(after, immediatelyBefore);
+    assert.deepEqual(withoutLockDirectoryTime(after), withoutLockDirectoryTime(before), `request changed files: ${request.join(' ')}`);
+    assert.equal(existsSync(`${recordFile(dir)}.lock`), false);
+  }
+});
+
+test('corrupt schema 3 baseline history and verification contexts are never rewritten', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'A criterion', '--json']), 'add');
+  jsonSuccess(run(dir, ['check', 'record', '--criterion', 'C1', '--status', 'skipped', '--reason', 'Not run', '--json', '--', 'node', '--test']), 'check');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Report', '--source', 'Caller', '--subject', 'Subject', '--limitations', 'Limited', '--check', 'CHK1', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'inconclusive', '--reason', 'Limited report', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'test/title.test.js', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'A revised criterion', '--evidence', 'E1', '--json']), 'revise');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'uncertain', '--reason', 'Review required', '--json']), 'baseline');
+  const file = recordFile(dir);
+  const valid = JSON.parse(readFileSync(file, 'utf8'));
+  const mutations = [
+    (record) => { record.revisions[0].unexpected = true; },
+    (record) => { record.revisions[0].target = 'C404'; },
+    (record) => { record.revisions[0].entryCount = 0; },
+    (record) => { record.revisions[0].evidenceIds = ['E404']; },
+    (record) => { record.baselines[0].revisionCount = 99; },
+    (record) => { record.baselines[0].evidenceCount = 0; },
+    (record) => { record.baselines[0].files[0].digest = 'bad'; },
+    (record) => { record.driftAssessments[0].baselineId = 'B404'; },
+    (record) => { record.driftAssessments[0].files[0].path = '/different-path'; },
+    (record) => { record.checkContexts = []; },
+    (record) => { record.checkContexts[0].revisionCount = 99; },
+    (record) => { record.evidenceContexts[0].entryCount = 0; },
+    (record) => { record.evaluationContexts[0].evaluationId = 'V404'; },
+    (record) => { record.evaluationContexts[0].unexpected = true; },
+  ];
+  for (const mutate of mutations) {
+    const damaged = JSON.parse(JSON.stringify(valid));
+    mutate(damaged);
+    const bytes = Buffer.from(JSON.stringify(damaged));
+    writeFileSync(file, bytes);
+    jsonFailure(run(dir, ['handoff', '--json']), 3, 'RECORD_CORRUPT');
+    jsonFailure(run(dir, ['baseline', 'capture', '--json']), 3, 'RECORD_CORRUPT');
+    assert.deepEqual(readFileSync(file), bytes);
+    assert.equal(existsSync(`${file}.lock`), false);
+  }
+});
+
+test('a reverted criterion retains intervening revisions and does not reuse earlier evaluations', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original text', '--json']), 'add');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Original observation', '--source', 'Caller', '--subject', 'Criterion', '--limitations', 'Limited', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Original assessment', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'no_concern', '--reason', 'Original state', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Weaker text', '--reason', 'First change', '--json']), 'revise');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Original text', '--reason', 'Restored original wording', '--json']), 'revise');
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.criteria[0].text, 'Original text');
+  assert.equal(handoff.criteria[0].evaluation, 'unverified');
+  assert.deepEqual(handoff.criteria[0].priorEvaluationIds, ['V1']);
+  assert.equal(handoff.baselineComparison.areas.criteria.state, 'changed');
+  assert.equal(handoff.baselineComparison.areas.criteria.changes[0].change, 'revised');
+  assert.deepEqual(handoff.baselineComparison.interveningRevisions.map((item) => item.reason), ['First change', 'Restored original wording']);
+  assert.equal(handoff.driftAssessments[0].areaBasisState, 'changed');
+});
+
+test('historical baseline comparisons do not attribute later evidence to the earlier transition', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original', '--json']), 'add');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['revise', 'C1', '--text', 'Changed', '--json']), 'revise');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Later report', '--source', 'Caller', '--subject', 'Changed criterion', '--limitations', 'Recorded after B2', '--json']), 'evidence');
+  const historical = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--to', 'B2', '--json']), 'baseline').comparison;
+  const current = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--json']), 'baseline').comparison;
+  assert.equal(historical.areas.criteria.state, 'changed');
+  assert.deepEqual(historical.affectedEvidenceCandidates, []);
+  assert.ok(current.affectedEvidenceCandidates.some((item) => item.evidenceId === 'E1'));
+});
+
+test('a criterion added and removed between comparisons remains visible as recorded activity', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'uncertain', '--reason', 'No criterion recorded yet', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Temporary criterion', '--reason', 'Exploration', '--json']), 'add');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'Temporary observation', '--source', 'Caller', '--subject', 'Criterion', '--limitations', 'Limited', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['revise', 'C1', '--remove', '--reason', 'No longer in scope', '--json']), 'revise');
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  const area = handoff.baselineComparison.areas.criteria;
+  assert.equal(area.state, 'changed');
+  assert.deepEqual(area.before, []);
+  assert.deepEqual(area.after, []);
+  assert.equal(area.interveningEntries[0].text, 'Temporary criterion');
+  assert.equal(area.interveningEntries[0].reason, 'Exploration');
+  assert.deepEqual(area.interveningRevisionIds, ['R1']);
+  assert.ok(handoff.baselineComparison.affectedEvidenceCandidates.some((item) => item.evidenceId === 'E1'));
+  assert.equal(handoff.driftAssessments[0].areaBasisState, 'changed');
+  const human = run(dir, ['baseline', 'compare', 'B1']);
+  assert.equal(human.status, 0);
+  assert.match(human.stdout, /C1 was recorded between snapshots/);
+  assert.match(human.stdout, /No longer in scope/);
+});
+
+test('a changed file selection does not hide an unavailable snapshot', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['baseline', 'capture', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--file', 'missing-input.test.js', '--json']), 'baseline');
+  const comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--to', 'B2', '--json']), 'baseline').comparison;
+  assert.equal(comparison.areas.verification.state, 'changed');
+  assert.equal(comparison.areas.verification.files[0].change, 'selection_added');
+  assert.equal(comparison.areas.verification.files[0].after.state, 'missing');
+  assert.equal(comparison.areas.verification.unknownFileCount, 1);
+  const status = run(dir, ['status']);
+  assert.equal(status.status, 0);
+  assert.match(status.stdout, /verification unknown; unknown selected files 1/);
+});
+
+test('concurrent baseline capture and revision preserve a consistent snapshot or report a lock', { timeout: 10_000 }, async () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Original', '--json']), 'add');
+  const captureArgs = ['baseline', 'capture', '--reason', 'Concurrent capture', '--json'];
+  const revisionArgs = ['revise', 'C1', '--text', 'Changed', '--reason', 'Concurrent revision', '--json'];
+  const captureChild = spawn(executable(dir), captureArgs, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  const revisionChild = spawn(executable(dir), revisionArgs, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  const outcomes = await Promise.all([collectChild(captureChild), collectChild(revisionChild)]);
+  for (const [index, args] of [captureArgs, revisionArgs].entries()) {
+    if (outcomes[index].status === 0) jsonSuccess(outcomes[index]);
+    else {
+      jsonFailure(outcomes[index], 3, 'RECORD_LOCKED');
+      jsonSuccess(run(dir, args));
+    }
+  }
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.baselines.length, 1);
+  assert.equal(handoff.revisions.length, 1);
+  assert.equal(handoff.criteria[0].text, 'Changed');
+  const baselineRevisionCount = handoff.baselines[0].revisionCount;
+  assert.ok(baselineRevisionCount === 0 || baselineRevisionCount === 1);
+  assert.equal(handoff.baselineComparison.areas.criteria.state, baselineRevisionCount === 0 ? 'changed' : 'unchanged');
+  assert.equal(existsSync(`${recordFile(dir)}.lock`), false);
+});
+
+test('baseline file paths use the CLI working directory with an explicit record elsewhere', () => {
+  const dir = fixture();
+  const custom = join(dir, 'records', 'work.json');
+  jsonSuccess(run(dir, ['init', '--intent', 'Use a selected record', '--record', custom, '--json']), 'init');
+  const baseline = jsonSuccess(run(dir, ['baseline', 'capture', '--record', custom, '--file', 'src/title.js', '--json']), 'baseline').baseline;
+  assert.equal(baseline.files[0].path, join(dir, 'src', 'title.js'));
+  assert.equal(baseline.files[0].state, 'captured');
+  assert.equal(existsSync(join(dir, '.synth')), false);
+  const before = snapshotTree(dir);
+  const comparison = jsonSuccess(run(dir, ['baseline', 'compare', 'B1', '--record', custom, '--json']), 'baseline').comparison;
+  assert.equal(comparison.areas.verification.files[0].change, 'matching');
+  jsonSuccess(run(dir, ['handoff', '--record', custom, '--json']), 'handoff');
+  assert.deepEqual(snapshotTree(dir), before);
 });
