@@ -10,7 +10,7 @@ import { snapshotFile } from './fingerprint.js';
 import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus, visibleText } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
-import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Expectation, type Verdict } from './verification.js';
+import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, reconcileCheck, type DirtyState, type Expectation, type Verdict } from './verification.js';
 import { addAcceptance, addDeliveryTarget, CASE_TYPES, DELIVERY_TARGETS, type CaseType, type DeliveryTargetKind } from './review.js';
 
 const CLI_VERSION = '0.1.0';
@@ -255,14 +255,29 @@ async function main(argv: string[]): Promise<void> {
     }
     if (command === 'check') {
       const mode = positionals[1];
-      if (positionals.length !== 2 || (mode !== 'run' && mode !== 'record')) throw usageError('Use check run or check record.');
-      if (selectedArgv === null || selectedArgv.length === 0 || selectedArgv.length > 100 || !selectedArgv[0]?.trim() || selectedArgv.some((arg) => arg.includes('\0'))) {
-        throw usageError('Provide the selected executable and up to 99 arguments after --.');
-      }
-      const modeOptions = mode === 'run'
+      if (mode !== 'run' && mode !== 'record' && mode !== 'reconcile') throw usageError('Use check run, check record, or check reconcile.');
+      if (positionals.length !== (mode === 'reconcile' ? 3 : 2)) throw usageError(mode === 'reconcile' ? 'Use check reconcile <id> --status skipped|inconclusive --reason <text>.' : 'Use check run or check record with an executable after --.');
+      const modeOptions = mode === 'reconcile'
+        ? ['record', 'json', 'status', 'reason']
+        : mode === 'run'
         ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'case', 'expect']
         : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref', 'case', 'expect'];
       for (const option of usedOptions) if (!modeOptions.includes(option)) throw usageError(`Option --${option} is not valid for check ${mode}.`);
+      if (mode === 'reconcile') {
+        const id = positionals[2]!;
+        if (!/^CHK[1-9][0-9]*$/.test(id)) throw usageError('Provide the pending check ID to reconcile, e.g. CHK1.');
+        if (values.status !== 'skipped' && values.status !== 'inconclusive') throw usageError('A reconciliation must report --status skipped or inconclusive.');
+        const reason = requiredText(values.reason, '--reason');
+        const check = updateRecord(location, (record) => {
+          const next = reconcileCheck(record, id, { status: values.status as 'skipped' | 'inconclusive', reason });
+          return { record: next.record, result: next.check };
+        });
+        writeSuccess(command, { recordPath: location, check }, `Reconciled pending check ${check.id} as ${check.status}; the pending request stays in the record.`);
+        return;
+      }
+      if (selectedArgv === null || selectedArgv.length === 0 || selectedArgv.length > 100 || !selectedArgv[0]?.trim() || selectedArgv.some((arg) => arg.includes('\0'))) {
+        throw usageError('Provide the selected executable and up to 99 arguments after --.');
+      }
       const caseType = values.case === undefined ? null : values.case;
       if (caseType !== null && !CASE_TYPES.includes(caseType as CaseType)) throw usageError('--case must be positive, negative, boundary, or regression.');
       const expect = values.expect === undefined ? null : values.expect;

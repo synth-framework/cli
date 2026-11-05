@@ -4,7 +4,7 @@ import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, type FileSnapshot, type Freshness } from './fingerprint.js';
 import { CASE_TYPES, type CaseType } from './review.js';
-import { keys, nextId, nonblank, object, oneOf, optionalText, optionalTimestamp, references, timestamp, validId } from './validate.js';
+import { hasOnlyKeys, keys, nextId, nonblank, object, oneOf, optionalText, optionalTimestamp, references, timestamp, validId } from './validate.js';
 
 export const OUTPUT_LIMIT_BYTES = 16 * 1024;
 export const MAX_TIMEOUT_MS = 300_000;
@@ -52,6 +52,7 @@ export interface Check {
   output: CheckOutput | null;
   caseType: CaseType | null;
   expect: Expectation | null;
+  reconciledAt: string | null;
 }
 
 export interface Evidence {
@@ -151,11 +152,15 @@ export function validateVerification(value: Record<string, unknown>, criterionId
   }
   const baseCheckKeys = ['id', 'invocation', 'status', 'argv', 'cwd', 'criterionIds', 'requestedAt', 'startedAt', 'endedAt', 'exitCode', 'signal', 'reason', 'revision', 'dirty', 'provenance', 'timeoutMs', 'captureOutput', 'outputRef', 'output'];
   const checkKeys = schema >= 5 ? [...baseCheckKeys, 'caseType', 'expect'] : schema >= 4 ? [...baseCheckKeys, 'caseType'] : baseCheckKeys;
+  // reconciledAt is optional in schema 5 so records written before reconciliation existed stay valid.
+  const allowedCheckKeys = schema >= 5 ? [...checkKeys, 'reconciledAt'] : checkKeys;
   const checks = new Map<string, Check>();
   for (const raw of value.checks as unknown[]) {
-    if (!object(raw) || !keys(raw, checkKeys)) corrupt('invalid check fields');
+    if (!object(raw) || !hasOnlyKeys(raw, allowedCheckKeys) || !checkKeys.every((key) => key in raw)) corrupt('invalid check fields');
     if (schema >= 4 && !(raw.caseType === null || oneOf(raw.caseType, CASE_TYPES))) corrupt('invalid check case label');
     if (schema >= 5 && !(raw.expect === null || raw.expect === 'pass' || raw.expect === 'fail')) corrupt('invalid check expectation');
+    if (schema >= 5 && !(raw.reconciledAt === undefined || raw.reconciledAt === null || timestamp(raw.reconciledAt))) corrupt('invalid check reconciliation');
+    if (raw.reconciledAt != null && (raw.invocation !== 'reported' || !oneOf(raw.status, ['skipped', 'inconclusive']))) corrupt('invalid check reconciliation');
     if (!validId(raw.id, 'CHK') || checks.has(raw.id)) corrupt('invalid or duplicate check ID');
     if (raw.invocation !== 'run' && raw.invocation !== 'reported') corrupt('invalid check invocation');
     if (!oneOf(raw.status, ['pending', 'passed', 'failed', 'timed_out', 'interrupted', 'could_not_start', 'skipped', 'inconclusive'])) corrupt('invalid check status');
@@ -182,7 +187,7 @@ export function validateVerification(value: Record<string, unknown>, criterionId
     } else {
       if (!oneOf(raw.status, ['skipped', 'inconclusive']) || !nonblank(raw.reason) || raw.startedAt !== null || raw.endedAt !== null || raw.exitCode !== null || raw.signal !== null || raw.timeoutMs !== null || raw.captureOutput || raw.output !== null) corrupt('invalid reported check');
     }
-    checks.set(raw.id as string, raw as unknown as Check);
+    checks.set(raw.id as string, { reconciledAt: null, ...raw } as unknown as Check);
   }
   const evidence = new Map<string, Evidence>();
   for (const raw of value.evidence as unknown[]) {
@@ -218,7 +223,7 @@ export function addCheck(record: WorkRecord, input: CheckInput, reported?: { sta
     startedAt: null, endedAt: null, exitCode: null, signal: null, reason: reported?.reason ?? null,
     revision: input.revision, dirty: input.dirty, provenance: input.provenance,
     timeoutMs: reported ? null : input.timeoutMs, captureOutput: reported ? false : input.captureOutput,
-    outputRef: input.outputRef, output: null, caseType: input.caseType, expect: input.expect ?? null,
+    outputRef: input.outputRef, output: null, caseType: input.caseType, expect: input.expect ?? null, reconciledAt: null,
   };
   const context = { checkId: check.id, entryCount: next.entries.length, revisionCount: next.revisions.length };
   return { record: { ...next, checks: [...next.checks, check], checkContexts: [...next.checkContexts, context] }, check };
@@ -231,6 +236,22 @@ export function completeCheck(record: WorkRecord, completed: Check): WorkRecordV
   const checks = [...next.checks];
   checks[index] = completed;
   return { ...next, checks };
+}
+
+/** Reconcile a pending check to a reported outcome, keeping the pending request in the record. */
+export function reconcileCheck(record: WorkRecord, id: string, outcome: { status: 'skipped' | 'inconclusive'; reason: string }): { record: WorkRecordV5; check: Check } {
+  const next = upgradeRecord(record);
+  const index = next.checks.findIndex((check) => check.id === id);
+  if (index < 0) throw usageError(`Check ${id} is not in this work record.`);
+  const pending = next.checks[index]!;
+  if (pending.status !== 'pending') throw usageError(`Check ${id} is ${pending.status}, not pending; only a pending check can be reconciled.`);
+  const checks = [...next.checks];
+  checks[index] = {
+    ...pending, invocation: 'reported', status: outcome.status, reason: outcome.reason,
+    startedAt: null, endedAt: null, exitCode: null, signal: null,
+    timeoutMs: null, captureOutput: false, output: null, reconciledAt: new Date().toISOString(),
+  };
+  return { record: { ...next, checks }, check: checks[index]! };
 }
 
 export function addEvidence(record: WorkRecord, input: EvidenceInput): { record: WorkRecordV5; evidence: Evidence } {

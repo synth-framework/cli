@@ -1035,6 +1035,42 @@ test('a failed final check write leaves a visible pending request', () => {
   assert.equal(handoff.criteria[0].evaluation, 'unverified');
 });
 
+test('check reconcile records a reported outcome for a pending check and keeps the pending history', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Reconciliation target', '--json']), 'add');
+  const lock = `${recordFile(dir)}.lock`;
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(lock)}, 'simulated competing lock')`;
+  jsonFailure(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--json', '--', process.execPath, '-e', script]), 3, 'IO_ERROR');
+  assert.ok(existsSync(lock));
+  unlinkSync(lock);
+  const before = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(before.checks[0].status, 'pending');
+  assert.equal(before.qaCoverage.checks.pending, 1);
+
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'passed', '--reason', 'Not allowed', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK9', '--status', 'inconclusive', '--reason', 'Unknown check', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--json']), 2, 'USAGE_ERROR');
+  const reconciled = jsonSuccess(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'inconclusive', '--reason', 'Inspected the leftover process; outcome unknown', '--json']), 'check').check;
+  assert.equal(reconciled.status, 'inconclusive');
+  assert.equal(reconciled.invocation, 'reported');
+  assert.equal(reconciled.reason, 'Inspected the leftover process; outcome unknown');
+  assert.match(reconciled.reconciledAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(reconciled.requestedAt, before.checks[0].requestedAt);
+  assert.equal(existsSync(lock), false);
+
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'skipped', '--reason', 'Again', '--json']), 2, 'USAGE_ERROR');
+
+  const after = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(after.checks[0].status, 'inconclusive');
+  assert.equal(after.checks[0].reconciledAt, reconciled.reconciledAt);
+  assert.equal(after.qaCoverage.checks.pending, 0);
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Reconciled from pending at /);
+  assert.match(human.stdout, /requested at /);
+});
+
 test('corrupt schema 2 and 3 verification fields and references are not rewritten', () => {
   const dir = fixture();
   initialize(dir);
@@ -1183,6 +1219,37 @@ test('a hard-killed runner leaves a pending request rather than claiming success
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
   assert.equal(handoff.checks[0].status, 'pending');
   assert.equal(handoff.criteria[0].evaluation, 'unverified');
+});
+
+test('check reconcile after a hard kill reports inconclusive without inventing a result', { timeout: 10_000 }, async (t) => {
+  if (!['linux', 'darwin'].includes(process.platform)) { t.skip('This interruption test requires POSIX signals.'); return; }
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Hard kill reconciliation', '--json']), 'add');
+  const ready = join(dir, 'reconcile-ready');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const child = spawn(executable(dir), ['check', 'run', '--capture-output', '--criterion', 'C1', '--timeout-ms', '5000', '--json', '--', process.execPath, '-e', script], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = collectChild(child);
+  let selectedPid;
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    if (selectedPid) { try { process.kill(selectedPid, 'SIGTERM'); } catch { /* It already exited. */ } }
+  });
+  await waitForFile(ready, child);
+  selectedPid = Number(readFileSync(ready, 'utf8'));
+  child.kill('SIGKILL');
+  const result = await closed;
+  assert.equal(result.signal, 'SIGKILL');
+  try { process.kill(selectedPid, 'SIGTERM'); } catch { /* It already exited. */ }
+  selectedPid = undefined;
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.checks[0].status, 'pending');
+  const reconciled = jsonSuccess(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'inconclusive', '--reason', 'Runner was hard-killed; outcome unknown', '--json']), 'check').check;
+  assert.equal(reconciled.status, 'inconclusive');
+  assert.ok(reconciled.reconciledAt);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.checks[0].status, 'inconclusive');
+  assert.equal(handoff.qaCoverage.checks.pending, 0);
 });
 
 test('nonblocking FIFO stdin waits for a delayed producer', { timeout: 30_000 }, async (t) => {

@@ -18,6 +18,7 @@ Usage:
     --status skipped|inconclusive --reason <text>
     [--cwd <path>] [--revision <text>] [--dirty clean|dirty|unknown] [--output-ref <reference>]
     [--record <path>] [--json] -- <executable> [arguments...]
+  synth check reconcile <id> --status skipped|inconclusive --reason <text> [--record <path>] [--json]
   synth evidence add [--criterion <id>] --summary <text> --source <text>
     --subject <text> --limitations <text> [--check <id>] [--revision <text>]
     [--artifact <reference>] [--subject-file <path>] [--record <path>] [--json]
@@ -140,6 +141,7 @@ function renderChecks(handoff: Handoff): string {
     if (check.outputRef !== null) lines.push(`    Output reference (not inspected): ${indented(check.outputRef, '      ')}`);
     if (check.output !== null) lines.push(`    Output: ${check.output.captured ? 'captured (may contain sensitive data)' : 'not captured'}; stdout ${check.output.stdout.bytes} bytes${check.output.stdout.truncated ? ' (truncated)' : ''}, stderr ${check.output.stderr.bytes} bytes${check.output.stderr.truncated ? ' (truncated)' : ''}.`);
     if (check.status === 'pending') lines.push('    Outcome not recorded; the command may or may not have started. Inspect before retrying.');
+    if (check.reconciledAt !== null) lines.push(`    Reconciled from pending at ${check.reconciledAt} (requested at ${check.requestedAt}); reported outcome, not run by SYNTH.`);
   }
   return lines.join('\n');
 }
