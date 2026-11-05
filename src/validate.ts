@@ -17,6 +17,11 @@ export function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly st
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
+/** Enum guard that never coerces: a non-string (even one with a hostile toString) is rejected. */
+export function oneOf(value: unknown, allowed: readonly string[]): boolean {
+  return typeof value === 'string' && allowed.includes(value);
+}
+
 export function nonblank(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }

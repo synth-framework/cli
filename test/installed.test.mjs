@@ -564,6 +564,42 @@ test('corrupt, unsupported, and structurally invalid records are visible and nev
   }
 });
 
+test('hostile non-string enum fields are corrupt records, never stringified (AUD-10)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Criterion C', '--json']), 'add');
+  jsonSuccess(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--json', '--', process.execPath, '-e', 'process.exit(0)']), 'check');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'A report', '--source', 'Caller', '--subject', 'Criterion C', '--limitations', 'Not independently verified', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Assessed', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['deliver', '--target', 'code', '--text', 'Delivered', '--json']), 'deliver');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--reason', 'Baseline', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'uncertain', '--reason', 'Needs review', '--evidence', 'E1', '--json']), 'baseline');
+  const file = recordFile(dir);
+  const pristine = JSON.parse(readFileSync(file, 'utf8'));
+  const hostile = { toString: null };
+  const edits = [
+    [['checks', 0, 'status'], ['status', '--json']],
+    [['checks', 0, 'caseType'], ['status', '--json']],
+    [['checks', 0, 'dirty'], ['status', '--json']],
+    [['checks', 0, 'provenance'], ['status', '--json']],
+    [['evaluations', 0, 'verdict'], ['status', '--json']],
+    [['deliveryTargets', 0, 'target'], ['handoff', '--json']],
+    [['driftAssessments', 0, 'area'], ['baseline', 'compare', 'B1', '--json']],
+    [['driftAssessments', 0, 'finding'], ['baseline', 'compare', 'B1', '--json']],
+  ];
+  for (const [path, command] of edits) {
+    const record = JSON.parse(JSON.stringify(pristine));
+    let node = record;
+    for (const key of path.slice(0, -1)) node = node[key];
+    node[path[path.length - 1]] = hostile;
+    writeFileSync(file, JSON.stringify(record));
+    jsonFailure(run(dir, command), 3, 'RECORD_CORRUPT');
+    assert.equal(existsSync(`${file}.lock`), false);
+  }
+  writeFileSync(file, JSON.stringify(pristine));
+  jsonSuccess(run(dir, ['status', '--json']), 'status');
+});
+
 test('malformed UTF-8 is rejected on reads and writes without changing record bytes', () => {
   const dir = fixture();
   initialize(dir);

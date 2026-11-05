@@ -2,7 +2,7 @@ import type { CriterionView, WorkRecord, WorkRecordV5 } from './domain.js';
 import type { BaselineComparison } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
-import { keys, nextId, nonblank, object, optionalText, references, timestamp, validCount, validId } from './validate.js';
+import { keys, nextId, nonblank, object, oneOf, optionalText, references, timestamp, validCount, validId } from './validate.js';
 
 /** Optional case label for a check, so negative and boundary coverage is visible. */
 export type CaseType = 'positive' | 'negative' | 'boundary' | 'regression';
@@ -95,7 +95,7 @@ export function validateReview(value: Record<string, unknown>, gapIds: Set<strin
   for (const raw of value.deliveryTargets as unknown[]) {
     if (!object(raw) || !keys(raw, ['id', 'target', 'text', 'reason', 'recordedAt', 'entryCount'])) corrupt('invalid delivery target fields');
     if (!validId(raw.id, 'T') || targetIds.has(raw.id)) corrupt('invalid or duplicate delivery target ID');
-    if (!DELIVERY_TARGETS.includes(raw.target as DeliveryTargetKind) || !nonblank(raw.text) || !optionalText(raw.reason) || !timestamp(raw.recordedAt) || !validCount(raw.entryCount, (value.entries as unknown[]).length)) corrupt('invalid delivery target');
+    if (!oneOf(raw.target, DELIVERY_TARGETS) || !nonblank(raw.text) || !optionalText(raw.reason) || !timestamp(raw.recordedAt) || !validCount(raw.entryCount, (value.entries as unknown[]).length)) corrupt('invalid delivery target');
     targetIds.add(raw.id as string);
   }
 }
