@@ -43,7 +43,7 @@ Final-stage validation has since been run on real machines and containers
 15.7.4 x86_64, Windows/WSL2, a remote `node:22-bookworm` Linux container, and
 the ubuntu-latest CI runner each passed the full suite (80/80 tests, 0 skipped)
 on the tree merged as `ef802f9`; environments and outputs are recorded in the
-linked issues (comments 6660008615 and 6660791107) and CI run 42041576167. No
+linked issues (comments 6660008615, 6662110107, and 6660791107) and CI run 42041576167. No
 platform support is claimed from design intent or from another OS's results —
 only those recorded runs count.
 

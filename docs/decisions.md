@@ -100,7 +100,7 @@
   (FV-01, issue #26; representative remote-workspace results stayed with S1-05,
   issue #9). Those runs have since been executed and each passed the full suite
   (80/80, 0 skipped) on the tree merged as `ef802f9`: macOS 15.7.4 x86_64 (#26,
-  comment 6660008615), Windows/WSL2 (#26), a remote `node:22-bookworm` Linux
+  comment 6660008615), Windows/WSL2 (#26, comment 6662110107), a remote `node:22-bookworm` Linux
   container (#9, comment 6660791107), and the ubuntu-latest CI runner (run
   42041576167). Native Windows remains deferred and unverified. Platform targets
   are not evidence of platform validation; only the recorded runs above count.
