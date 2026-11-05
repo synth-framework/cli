@@ -3,9 +3,12 @@
 SYNTH is an agent-first CLI for keeping a bounded work intention and its
 context available to a developer and coding agent. It captures and resumes
 work, runs explicitly selected checks, records attributed evidence and criterion
-evaluations, and compares optional baselines. It does **not** record formal
-review findings or acceptance. A check, evidence item, evaluation, drift
-assessment, and acceptance are different things.
+evaluations, compares optional baselines, and records acceptance as a
+self-attestation with known gaps. A check, evidence item, evaluation, drift
+assessment, and acceptance are different things: SYNTH records each one
+separately and never promotes one into another. It does not record formal
+review findings, and a recorded acceptance is not proof of presence,
+verification, or delegation.
 
 The CLI targets Node.js 22+ on macOS and Linux, including agent workspaces.
 Platform targets are not a claim that a particular environment was tested.
