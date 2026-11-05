@@ -69,6 +69,7 @@ synchronization.
 ### Final stage — independent adoption audit (gated on #32-#40)
 
 - [#41 ADOPT-01: independent adoption-fixture audit (installed-package, E2E, platform, dev+agent)](https://github.com/synth-framework/cli/issues/41)
+- [#42 AUDIT-02: re-run internal audit (product/architecture/security/distribution) after #32-#40 are fixed](https://github.com/synth-framework/cli/issues/42)
 
 ## Housekeeping notes
 
