@@ -744,6 +744,26 @@ test('a timeout requests termination of the selected POSIX process group', { tim
   assert.equal(existsSync(late), false, 'The descendant continued after the timeout.');
 });
 
+test('timeout escalation kills a same-group descendant that ignores SIGTERM even after the leader exits', { timeout: 30_000 }, async (t) => {
+  if (!['linux', 'darwin'].includes(process.platform)) { t.skip('This check requires POSIX process groups.'); return; }
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Resistant same-group descendant', '--json']), 'add');
+  const started = join(dir, 'descendant-started');
+  const late = join(dir, 'descendant-late-effect');
+  // The worker stays in the selected process group and ignores SIGTERM; it would
+  // perform a late effect unless the escalation SIGKILL reaches the group.
+  const worker = `const fs = require('node:fs'); process.on('SIGTERM', () => {}); fs.writeFileSync(${JSON.stringify(started)}, 'started'); setTimeout(() => fs.writeFileSync(${JSON.stringify(late)}, 'late'), 2500);`;
+  // The leader exits on SIGTERM (default disposition), so the CLI's child closes
+  // before the escalation window ends — the AUD-01 condition.
+  const parent = `require('node:child_process').spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(worker)}], { stdio: 'ignore' }); setTimeout(() => {}, 5000);`;
+  const result = jsonSuccess(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--timeout-ms', '800', '--json', '--', process.execPath, '-e', parent]), 'check').check;
+  assert.equal(result.status, 'timed_out');
+  assert.equal(existsSync(started), true, 'The descendant must start for this test to be meaningful.');
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 3000));
+  assert.equal(existsSync(late), false, 'A same-group descendant that ignored SIGTERM survived the escalation window.');
+});
+
 test('a selected check does not invoke Git for provenance', () => {
   const dir = fixture();
   initialize(dir);

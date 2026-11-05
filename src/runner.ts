@@ -55,8 +55,15 @@ export async function runSelectedCheck(check: Check): Promise<{ check: Check; in
       if (finished) return;
       finished = true;
       if (deadline) clearTimeout(deadline);
-      if (escalation) clearTimeout(escalation);
-      if (forcedFinish) clearTimeout(forcedFinish);
+      if (cause === null) {
+        // Normal completion: no stop was requested, so cancel pending timers.
+        if (escalation) clearTimeout(escalation);
+        if (forcedFinish) clearTimeout(forcedFinish);
+      }
+      // When a stop was requested (timeout/interrupt), the escalation timer must
+      // still fire: the selected leader may close before the escalation window
+      // ends while same-group descendants that ignored SIGTERM are still alive,
+      // and the scheduled SIGKILL to the process group is what removes them.
       process.removeListener('SIGINT', onInt);
       process.removeListener('SIGTERM', onTerm);
       const output: CheckOutput = {
