@@ -7,7 +7,7 @@ import { addDriftAssessment, addRevision, captureBaseline, compareBaselines, typ
 import { upgradeRecord } from './evolution.js';
 import { hasErrorCode, SynthError, usageError } from './errors.js';
 import { snapshotFile } from './fingerprint.js';
-import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from './presentation.js';
+import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus, visibleText } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
 import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Expectation, type Verdict } from './verification.js';
@@ -132,7 +132,7 @@ async function main(argv: string[]): Promise<void> {
     const outputJson = values.json === true;
     const writeSuccess = (name: string, data: unknown, human: string, version: number = OUTPUT_VERSION): void => {
       if (outputJson) process.stdout.write(`${JSON.stringify({ outputVersion: version, ok: true, command: name, data })}\n`);
-      else process.stdout.write(`${human}\n`);
+      else process.stdout.write(`${visibleText(human)}\n`);
     };
 
     if (values.help === true) {
@@ -386,7 +386,7 @@ async function main(argv: string[]): Promise<void> {
     const failure = error instanceof SynthError ? error : new SynthError('INTERNAL_ERROR', 'Unexpected error. Inspect the work record before retrying.', 1);
     if (jsonRequested) {
       process.stderr.write(`${JSON.stringify({ outputVersion: OUTPUT_VERSION, ok: false, command, error: { code: failure.code, message: failure.message } })}\n`);
-    } else process.stderr.write(`${failure.code}: ${failure.message}\n`);
+    } else process.stderr.write(`${failure.code}: ${visibleText(failure.message)}\n`);
     process.exitCode = failure.exitCode;
   }
 }

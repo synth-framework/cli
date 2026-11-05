@@ -159,6 +159,20 @@ function renderEvidence(handoff: Handoff): string {
   return lines.join('\n');
 }
 
+/**
+ * Render control characters visibly in human output so untrusted record text
+ * cannot inject terminal controls (AUD-09). JSON output is never passed
+ * through this; it stays raw (and JSON.stringify already escapes controls).
+ */
+export function visibleText(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, (ch) => {
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) return String.fromCharCode(0x2400 + code);
+    if (code === 0x7f) return '\u2421';
+    return String.fromCharCode(0x2400 + (code - 0x40));
+  });
+}
+
 export function renderComparison(comparison: BaselineComparison): string {
   const lines = [`Baseline ${comparison.baselineId} -> ${comparison.comparedTo} (${comparison.direction}; recorded changes, not a semantic drift judgment):`];
   for (const area of ['intention', 'scope', 'criteria', 'verification'] as const) {

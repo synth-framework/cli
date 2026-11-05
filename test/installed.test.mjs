@@ -528,6 +528,20 @@ test('a FIFO or directory at the record path is rejected without blocking, leavi
   jsonSuccess(run(dir, ['status', '--json']), 'status');
 });
 
+test('human output renders control characters visibly while JSON output keeps raw text', () => {
+  const dir = fixture();
+  initialize(dir);
+  const evil = 'clear\u001b[2J\u001b]8;;https://example.invalid\u0007bell';
+  jsonSuccess(run(dir, ['add', 'gap', '--text', evil, '--json']), 'add');
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.ok(!human.stdout.includes('\u001b'), `raw ESC byte leaked into human output: ${JSON.stringify(human.stdout)}`);
+  assert.ok(!human.stdout.includes('\u0007'), 'raw BEL byte leaked into human output');
+  assert.ok(human.stdout.includes('\u241b'), 'ESC should render as a visible control picture');
+  const parsed = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff');
+  assert.equal(parsed.handoff.gaps[0].text, evil);
+});
+
 test('corrupt, unsupported, and structurally invalid records are visible and never reset', () => {
   const dir = fixture();
   initialize(dir);
