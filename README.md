@@ -395,3 +395,9 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 
 The fixture is disposable and independent of the source checkout. Remove the
 chosen temporary directory yourself when finished.
+
+## License
+
+MIT — see [LICENSE](LICENSE). `npm pack` builds `dist/` first (`prepack`), so a
+tarball from a clean checkout always ships the `synth` executable, the license,
+and these docs.

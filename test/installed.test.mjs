@@ -136,6 +136,20 @@ function run(directory, args, options = {}) {
   return result;
 }
 
+function tarList(tarball) {
+  const result = spawnSync('tar', ['-tzf', tarball], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.error, undefined, `tar could not run: ${result.error}`);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.split('\n').filter(Boolean);
+}
+
+function tarRead(tarball, member) {
+  const result = spawnSync('tar', ['-xzOf', tarball, member], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.error, undefined, `tar could not run: ${result.error}`);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
 function runWithPreload(directory, preload, args, options = {}) {
   const result = spawnSync(process.execPath, ['--require', preload, executable(directory), ...args], {
     cwd: directory,
@@ -686,6 +700,40 @@ test('acceptance state is qualified, and selected-input and later-record signals
   assert.doesNotMatch(helpText, /anything\s+relevant/i);
   assert.match(helpText, /counts only/);
   assert.match(helpText, /separate reassessment\s+signals/);
+});
+
+test('a clean copy packs the declared executable, license, and docs (AUD-02)', { timeout: 300_000 }, () => {
+  const manifestPath = join(repository, 'package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(manifest.license, 'MIT');
+  assert.equal('private' in manifest, false, 'the package must no longer be marked private');
+  assert.equal(manifest.scripts.prepack, 'npm run build');
+  const license = readFileSync(join(repository, 'LICENSE'), 'utf8');
+  assert.match(license, /MIT License/);
+  assert.match(license, /Copyright \(c\) \d{4} SYNTH Framework contributors/);
+
+  // A clean checkout has no dist/: pack only works because prepack builds first.
+  const copy = join(sandbox, `pack-copy-${++fixtureNumber}`);
+  mkdirSync(copy);
+  for (const item of ['package.json', 'package-lock.json', 'tsconfig.json', 'src', 'docs', 'LICENSE', 'README.md']) {
+    cpSync(join(repository, item), join(copy, item), { recursive: true });
+  }
+  assert.equal(existsSync(join(copy, 'dist')), false, 'the clean copy must not ship a prebuilt dist/');
+  npm(['ci'], copy);
+  const packed = JSON.parse(npm(['pack', '--json'], copy));
+  assert.equal(packed.length, 1);
+  const tarball = join(copy, packed[0].filename);
+  assert.ok(existsSync(join(copy, 'dist', 'cli.js')), 'prepack must build the declared bin');
+  const members = tarList(tarball);
+  assert.ok(members.includes('package/dist/cli.js'), `tarball is missing the declared bin: ${members.join(', ')}`);
+  assert.ok(members.includes('package/LICENSE'), 'tarball is missing the license');
+  assert.ok(members.includes('package/README.md'), 'tarball is missing the README');
+  assert.ok(members.some((name) => name.startsWith('package/docs/')), 'tarball is missing the docs directory');
+  const packedManifest = JSON.parse(tarRead(tarball, 'package/package.json'));
+  assert.equal(packedManifest.license, 'MIT');
+  assert.equal('private' in packedManifest, false);
+  assert.equal(packedManifest.bin.synth, 'dist/cli.js');
+  assert.match(tarRead(tarball, 'package/LICENSE'), /MIT License/);
 });
 
 test('hostile non-string enum fields are corrupt records, never stringified (AUD-10)', () => {
