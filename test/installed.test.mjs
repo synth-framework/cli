@@ -136,6 +136,20 @@ function run(directory, args, options = {}) {
   return result;
 }
 
+function tarList(tarball) {
+  const result = spawnSync('tar', ['-tzf', tarball], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.error, undefined, `tar could not run: ${result.error}`);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.split('\n').filter(Boolean);
+}
+
+function tarRead(tarball, member) {
+  const result = spawnSync('tar', ['-xzOf', tarball, member], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.error, undefined, `tar could not run: ${result.error}`);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
 function runWithPreload(directory, preload, args, options = {}) {
   const result = spawnSync(process.execPath, ['--require', preload, executable(directory), ...args], {
     cwd: directory,
@@ -329,7 +343,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
     scenarios: 'available',
     checkExpectation: 'available',
     questionResolution: 'not_available',
-    gapAndActionResolution: 'not_available',
+    gapAndActionResolution: 'available',
     planAndDecisionSupersession: 'not_available',
   });
   const human = run(dir, ['handoff']);
@@ -505,6 +519,43 @@ test('explicit record paths work without discovering or creating a default recor
   jsonFailure(run(dir, ['status', '--record', alias, '--json']), 3, 'IO_ERROR');
 });
 
+test('a FIFO or directory at the record path is rejected without blocking, leaving no lock', { timeout: 10_000 }, () => {
+  const dir = fixture();
+  initialize(dir);
+  const file = recordFile(dir);
+  // AUD-08: the record is opened without following a final symlink and read
+  // from the opened descriptor, so a path swapped before the open (symlink,
+  // FIFO) is rejected at open/fstat time and can never be read or block.
+  unlinkSync(file);
+  const created = spawnSync('mkfifo', [file], { encoding: 'utf8', timeout: 5_000 });
+  if (created.error === undefined) {
+    assert.equal(created.status, 0, created.stderr);
+    jsonFailure(run(dir, ['status', '--json']), 3, 'IO_ERROR');
+    assert.equal(existsSync(`${file}.lock`), false);
+    unlinkSync(file);
+  }
+  mkdirSync(file);
+  jsonFailure(run(dir, ['status', '--json']), 3, 'IO_ERROR');
+  assert.equal(existsSync(`${file}.lock`), false);
+  rmSync(file, { recursive: true, force: true });
+  initialize(dir);
+  jsonSuccess(run(dir, ['status', '--json']), 'status');
+});
+
+test('human output renders control characters visibly while JSON output keeps raw text', () => {
+  const dir = fixture();
+  initialize(dir);
+  const evil = 'clear\u001b[2J\u001b]8;;https://example.invalid\u0007bell';
+  jsonSuccess(run(dir, ['add', 'gap', '--text', evil, '--json']), 'add');
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.ok(!human.stdout.includes('\u001b'), `raw ESC byte leaked into human output: ${JSON.stringify(human.stdout)}`);
+  assert.ok(!human.stdout.includes('\u0007'), 'raw BEL byte leaked into human output');
+  assert.ok(human.stdout.includes('\u241b'), 'ESC should render as a visible control picture');
+  const parsed = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff');
+  assert.equal(parsed.handoff.gaps[0].text, evil);
+});
+
 test('corrupt, unsupported, and structurally invalid records are visible and never reset', () => {
   const dir = fixture();
   initialize(dir);
@@ -525,6 +576,200 @@ test('corrupt, unsupported, and structurally invalid records are visible and nev
     assert.equal(readFileSync(file, 'utf8'), contents);
     assert.equal(existsSync(`${file}.lock`), false);
   }
+});
+
+test('gap and next-action resolution keeps history and changes the open counts (AUD-06)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Uncertain area', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'next', '--text', 'Follow up on the area', '--json']), 'add');
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.capabilities.gapAndActionResolution, 'available');
+  assert.equal(handoff.qaCoverage.risks.openGaps, 1);
+  assert.equal(handoff.gaps[0].resolved, null);
+
+  jsonFailure(run(dir, ['resolve', 'gap', 'G1', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['resolve', 'criterion', 'C1', '--reason', 'Nope', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['resolve', 'gap', 'G9', '--reason', 'Nope', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['reopen', 'gap', 'G1', '--reason', 'Not resolved yet', '--json']), 2, 'USAGE_ERROR');
+
+  const resolved = jsonSuccess(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Area was verified', '--json']), 'resolve').entry;
+  assert.equal(resolved.resolved, true);
+  assert.match(resolved.resolvedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(resolved.resolutionReason, 'Area was verified');
+  assert.deepEqual(resolved.resolutionHistory.map((event) => event.state), ['resolved']);
+  assert.equal(resolved.text, 'Uncertain area');
+
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.qaCoverage.risks.openGaps, 0);
+  assert.equal(handoff.gaps[0].resolved, true);
+  assert.equal(handoff.nextActions[0].resolved, null);
+  let human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Resolved at /);
+  assert.match(human.stdout, /Resolution history: resolved at /);
+
+  jsonFailure(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Again', '--json']), 2, 'USAGE_ERROR');
+  const reopened = jsonSuccess(run(dir, ['reopen', 'gap', 'G1', '--reason', 'Area became uncertain again', '--json']), 'reopen').entry;
+  assert.equal(reopened.resolved, false);
+  assert.equal(reopened.resolutionReason, 'Area became uncertain again');
+  assert.deepEqual(reopened.resolutionHistory.map((event) => event.state), ['resolved', 'reopened']);
+
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.qaCoverage.risks.openGaps, 1);
+  assert.equal(handoff.gaps[0].resolved, false);
+  human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Reopened at /);
+  assert.match(human.stdout, /Resolution history: resolved at .*reopened at /);
+
+  const resolvedAction = jsonSuccess(run(dir, ['resolve', 'next', 'N1', '--reason', 'Follow-up done', '--json']), 'resolve').entry;
+  assert.equal(resolvedAction.resolved, true);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.nextActions[0].resolved, true);
+});
+
+test('resolution works on records migrated from older schemas (AUD-06)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Legacy gap', '--json']), 'add');
+  const file = recordFile(dir);
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  record.schemaVersion = 4;
+  record.entries = record.entries.map(({ criterionId, ...rest }) => rest);
+  writeFileSync(file, JSON.stringify(record, null, 2));
+  jsonSuccess(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Legacy resolved', '--json']), 'resolve');
+  const stored = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(stored.schemaVersion, 5);
+  assert.equal(stored.entries[0].resolved, true);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.gaps[0].resolved, true);
+});
+
+test('acceptance state is qualified, and selected-input and later-record signals stay separate (AUD-03)', () => {
+  const dir = fixture();
+  initialize(dir);
+  const target = join(dir, 'selected-input.txt');
+  writeFileSync(target, 'original selected content');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--file', target, '--json']), 'baseline');
+  jsonSuccess(run(dir, ['accept', '--statement', 'Accepted while the selected file is unchanged', '--json']), 'accept');
+  // The audit probe: a selected file changed after acceptance. The state stays a
+  // count comparison, so it remains current and the change is reported as a signal.
+  writeFileSync(target, 'selected content changed after acceptance');
+  let handoff = jsonSuccess(run(dir, ['status', '--json']), 'status').handoff;
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.stateBasis, 'count comparison only');
+  assert.equal(handoff.acceptance.stateLabel, 'current (count comparison only)');
+  assert.deepEqual(handoff.acceptance.changedSince, []);
+  assert.deepEqual(handoff.acceptance.reassessmentSignals, {
+    changedCounts: [], changedSelectedInputs: 1, unknownSelectedInputs: 0, laterDriftAssessments: 0, laterDeliveryTargets: 0,
+  });
+  // A drift assessment and a delivery target recorded later are reported, never folded into the state.
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'unintended', '--reason', 'Verification area grew', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['deliver', '--target', 'code', '--text', 'Handoff-ready slice', '--json']), 'deliver');
+  handoff = jsonSuccess(run(dir, ['status', '--json']), 'status').handoff;
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDriftAssessments, 1);
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDeliveryTargets, 1);
+  let human = run(dir, ['status']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /is current \(count comparison only\)/);
+  assert.match(human.stdout, /drift assessments recorded since: 1; delivery targets recorded since: 1/);
+  // A changed count still drives the state, and the qualified label follows it.
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Recorded after acceptance', '--json']), 'add');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.acceptance.state, 'reassessment_needed');
+  assert.equal(handoff.acceptance.stateLabel, 'reassessment needed (count comparison only)');
+  assert.deepEqual(handoff.acceptance.changedSince, ['entries']);
+  assert.deepEqual(handoff.acceptance.reassessmentSignals.changedCounts, ['entries']);
+  // Prior acceptances are exposed instead of only the latest one.
+  jsonSuccess(run(dir, ['accept', '--statement', 'Reassessed after the new gap', '--gap', 'G1', '--reassess', '--json']), 'accept');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.deepEqual(handoff.acceptanceHistory.map((item) => `${item.id}:${item.kind}`), ['AC1:initial', 'AC2:reassessment']);
+  assert.equal(handoff.acceptance.id, 'AC2');
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDriftAssessments, 0);
+  human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Earlier acceptances retained in the record \(1; superseded by AC2/);
+  assert.match(human.stdout, /AC1 \[initial\] recorded /);
+  // Help no longer claims the handoff judges whether anything relevant changed.
+  const help = run(dir, ['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  const helpText = help.stdout.replaceAll('␊', '\n');
+  assert.doesNotMatch(helpText, /anything\s+relevant/i);
+  assert.match(helpText, /counts only/);
+  assert.match(helpText, /separate reassessment\s+signals/);
+});
+
+test('a clean copy packs the declared executable, license, and docs (AUD-02)', { timeout: 300_000 }, () => {
+  const manifestPath = join(repository, 'package.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert.equal(manifest.license, 'MIT');
+  assert.equal('private' in manifest, false, 'the package must no longer be marked private');
+  assert.equal(manifest.scripts.prepack, 'npm run build');
+  const license = readFileSync(join(repository, 'LICENSE'), 'utf8');
+  assert.match(license, /MIT License/);
+  assert.match(license, /Copyright \(c\) \d{4} SYNTH Framework contributors/);
+
+  // A clean checkout has no dist/: pack only works because prepack builds first.
+  const copy = join(sandbox, `pack-copy-${++fixtureNumber}`);
+  mkdirSync(copy);
+  for (const item of ['package.json', 'package-lock.json', 'tsconfig.json', 'src', 'docs', 'LICENSE', 'README.md']) {
+    cpSync(join(repository, item), join(copy, item), { recursive: true });
+  }
+  assert.equal(existsSync(join(copy, 'dist')), false, 'the clean copy must not ship a prebuilt dist/');
+  npm(['ci'], copy);
+  const packed = JSON.parse(npm(['pack', '--json'], copy));
+  assert.equal(packed.length, 1);
+  const tarball = join(copy, packed[0].filename);
+  assert.ok(existsSync(join(copy, 'dist', 'cli.js')), 'prepack must build the declared bin');
+  const members = tarList(tarball);
+  assert.ok(members.includes('package/dist/cli.js'), `tarball is missing the declared bin: ${members.join(', ')}`);
+  assert.ok(members.includes('package/LICENSE'), 'tarball is missing the license');
+  assert.ok(members.includes('package/README.md'), 'tarball is missing the README');
+  assert.ok(members.some((name) => name.startsWith('package/docs/')), 'tarball is missing the docs directory');
+  const packedManifest = JSON.parse(tarRead(tarball, 'package/package.json'));
+  assert.equal(packedManifest.license, 'MIT');
+  assert.equal('private' in packedManifest, false);
+  assert.equal(packedManifest.bin.synth, 'dist/cli.js');
+  assert.match(tarRead(tarball, 'package/LICENSE'), /MIT License/);
+});
+
+test('hostile non-string enum fields are corrupt records, never stringified (AUD-10)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Criterion C', '--json']), 'add');
+  jsonSuccess(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--json', '--', process.execPath, '-e', 'process.exit(0)']), 'check');
+  jsonSuccess(run(dir, ['evidence', 'add', '--criterion', 'C1', '--summary', 'A report', '--source', 'Caller', '--subject', 'Criterion C', '--limitations', 'Not independently verified', '--json']), 'evidence');
+  jsonSuccess(run(dir, ['evaluate', 'C1', '--status', 'supported', '--reason', 'Assessed', '--evidence', 'E1', '--json']), 'evaluate');
+  jsonSuccess(run(dir, ['deliver', '--target', 'code', '--text', 'Delivered', '--json']), 'deliver');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--reason', 'Baseline', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'criteria', '--finding', 'uncertain', '--reason', 'Needs review', '--evidence', 'E1', '--json']), 'baseline');
+  const file = recordFile(dir);
+  const pristine = JSON.parse(readFileSync(file, 'utf8'));
+  const hostile = { toString: null };
+  const edits = [
+    [['checks', 0, 'status'], ['status', '--json']],
+    [['checks', 0, 'caseType'], ['status', '--json']],
+    [['checks', 0, 'dirty'], ['status', '--json']],
+    [['checks', 0, 'provenance'], ['status', '--json']],
+    [['evaluations', 0, 'verdict'], ['status', '--json']],
+    [['deliveryTargets', 0, 'target'], ['handoff', '--json']],
+    [['driftAssessments', 0, 'area'], ['baseline', 'compare', 'B1', '--json']],
+    [['driftAssessments', 0, 'finding'], ['baseline', 'compare', 'B1', '--json']],
+  ];
+  for (const [path, command] of edits) {
+    const record = JSON.parse(JSON.stringify(pristine));
+    let node = record;
+    for (const key of path.slice(0, -1)) node = node[key];
+    node[path[path.length - 1]] = hostile;
+    writeFileSync(file, JSON.stringify(record));
+    jsonFailure(run(dir, command), 3, 'RECORD_CORRUPT');
+    assert.equal(existsSync(`${file}.lock`), false);
+  }
+  writeFileSync(file, JSON.stringify(pristine));
+  jsonSuccess(run(dir, ['status', '--json']), 'status');
 });
 
 test('malformed UTF-8 is rejected on reads and writes without changing record bytes', () => {
@@ -744,6 +989,26 @@ test('a timeout requests termination of the selected POSIX process group', { tim
   assert.equal(existsSync(late), false, 'The descendant continued after the timeout.');
 });
 
+test('timeout escalation kills a same-group descendant that ignores SIGTERM even after the leader exits', { timeout: 30_000 }, async (t) => {
+  if (!['linux', 'darwin'].includes(process.platform)) { t.skip('This check requires POSIX process groups.'); return; }
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Resistant same-group descendant', '--json']), 'add');
+  const started = join(dir, 'descendant-started');
+  const late = join(dir, 'descendant-late-effect');
+  // The worker stays in the selected process group and ignores SIGTERM; it would
+  // perform a late effect unless the escalation SIGKILL reaches the group.
+  const worker = `const fs = require('node:fs'); process.on('SIGTERM', () => {}); fs.writeFileSync(${JSON.stringify(started)}, 'started'); setTimeout(() => fs.writeFileSync(${JSON.stringify(late)}, 'late'), 2500);`;
+  // The leader exits on SIGTERM (default disposition), so the CLI's child closes
+  // before the escalation window ends — the AUD-01 condition.
+  const parent = `require('node:child_process').spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(worker)}], { stdio: 'ignore' }); setTimeout(() => {}, 5000);`;
+  const result = jsonSuccess(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--timeout-ms', '800', '--json', '--', process.execPath, '-e', parent]), 'check').check;
+  assert.equal(result.status, 'timed_out');
+  assert.equal(existsSync(started), true, 'The descendant must start for this test to be meaningful.');
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 3000));
+  assert.equal(existsSync(late), false, 'A same-group descendant that ignored SIGTERM survived the escalation window.');
+});
+
 test('a selected check does not invoke Git for provenance', () => {
   const dir = fixture();
   initialize(dir);
@@ -942,6 +1207,42 @@ test('a failed final check write leaves a visible pending request', () => {
   assert.equal(handoff.criteria[0].evaluation, 'unverified');
 });
 
+test('check reconcile records a reported outcome for a pending check and keeps the pending history', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Reconciliation target', '--json']), 'add');
+  const lock = `${recordFile(dir)}.lock`;
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(lock)}, 'simulated competing lock')`;
+  jsonFailure(run(dir, ['check', 'run', '--capture-output', '--criterion', 'C1', '--json', '--', process.execPath, '-e', script]), 3, 'IO_ERROR');
+  assert.ok(existsSync(lock));
+  unlinkSync(lock);
+  const before = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(before.checks[0].status, 'pending');
+  assert.equal(before.qaCoverage.checks.pending, 1);
+
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'passed', '--reason', 'Not allowed', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK9', '--status', 'inconclusive', '--reason', 'Unknown check', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--json']), 2, 'USAGE_ERROR');
+  const reconciled = jsonSuccess(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'inconclusive', '--reason', 'Inspected the leftover process; outcome unknown', '--json']), 'check').check;
+  assert.equal(reconciled.status, 'inconclusive');
+  assert.equal(reconciled.invocation, 'reported');
+  assert.equal(reconciled.reason, 'Inspected the leftover process; outcome unknown');
+  assert.match(reconciled.reconciledAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(reconciled.requestedAt, before.checks[0].requestedAt);
+  assert.equal(existsSync(lock), false);
+
+  jsonFailure(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'skipped', '--reason', 'Again', '--json']), 2, 'USAGE_ERROR');
+
+  const after = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(after.checks[0].status, 'inconclusive');
+  assert.equal(after.checks[0].reconciledAt, reconciled.reconciledAt);
+  assert.equal(after.qaCoverage.checks.pending, 0);
+  const human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Reconciled from pending at /);
+  assert.match(human.stdout, /requested at /);
+});
+
 test('corrupt schema 2 and 3 verification fields and references are not rewritten', () => {
   const dir = fixture();
   initialize(dir);
@@ -1090,6 +1391,37 @@ test('a hard-killed runner leaves a pending request rather than claiming success
   const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
   assert.equal(handoff.checks[0].status, 'pending');
   assert.equal(handoff.criteria[0].evaluation, 'unverified');
+});
+
+test('check reconcile after a hard kill reports inconclusive without inventing a result', { timeout: 10_000 }, async (t) => {
+  if (!['linux', 'darwin'].includes(process.platform)) { t.skip('This interruption test requires POSIX signals.'); return; }
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'criterion', '--text', 'Hard kill reconciliation', '--json']), 'add');
+  const ready = join(dir, 'reconcile-ready');
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const child = spawn(executable(dir), ['check', 'run', '--capture-output', '--criterion', 'C1', '--timeout-ms', '5000', '--json', '--', process.execPath, '-e', script], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = collectChild(child);
+  let selectedPid;
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    if (selectedPid) { try { process.kill(selectedPid, 'SIGTERM'); } catch { /* It already exited. */ } }
+  });
+  await waitForFile(ready, child);
+  selectedPid = Number(readFileSync(ready, 'utf8'));
+  child.kill('SIGKILL');
+  const result = await closed;
+  assert.equal(result.signal, 'SIGKILL');
+  try { process.kill(selectedPid, 'SIGTERM'); } catch { /* It already exited. */ }
+  selectedPid = undefined;
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.checks[0].status, 'pending');
+  const reconciled = jsonSuccess(run(dir, ['check', 'reconcile', 'CHK1', '--status', 'inconclusive', '--reason', 'Runner was hard-killed; outcome unknown', '--json']), 'check').check;
+  assert.equal(reconciled.status, 'inconclusive');
+  assert.ok(reconciled.reconciledAt);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.checks[0].status, 'inconclusive');
+  assert.equal(handoff.qaCoverage.checks.pending, 0);
 });
 
 test('nonblocking FIFO stdin waits for a delayed producer', { timeout: 30_000 }, async (t) => {

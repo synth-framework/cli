@@ -8,7 +8,7 @@ import {
 } from './baseline.js';
 import { validateVerification, type Check, type CheckView, type CriterionContextView, type Evidence, type EvidenceView, type Evaluation, type EvaluationView, type Verdict } from './verification.js';
 import { validateReview, type Acceptance, type AcceptanceView, type DeliveryTarget, type QaCoverage, acceptanceView, computeQaCoverage } from './review.js';
-import { hasOnlyKeys, nonblank, object, timestamp } from './validate.js';
+import { hasOnlyKeys, nonblank, object, oneOf, timestamp } from './validate.js';
 
 export const KIND_PREFIX = {
   outcome: 'O',
@@ -33,6 +33,12 @@ export const KIND_PREFIX = {
 
 export type EntryKind = keyof typeof KIND_PREFIX;
 
+export interface ResolutionEvent {
+  at: string;
+  reason: string;
+  state: 'resolved' | 'reopened';
+}
+
 export interface Entry {
   id: string;
   kind: EntryKind;
@@ -41,6 +47,11 @@ export interface Entry {
   questionId: string | null;
   criterionId: string | null;
   createdAt: string;
+  // Resolution state for gap and next-action entries (schema 5, optional).
+  resolved?: boolean | null;
+  resolvedAt?: string | null;
+  resolutionReason?: string | null;
+  resolutionHistory?: ResolutionEvent[] | null;
 }
 
 interface RecordBase {
@@ -161,7 +172,8 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     : ['id', 'kind', 'text', 'reason', 'questionId', 'createdAt'];
   for (const item of value.entries) {
     if (!object(item)) return corrupt('an entry is not an object');
-    if (!hasOnlyKeys(item, entryKeys)) {
+    const resolutionKeys = schema >= 5 && (item.kind === 'gap' || item.kind === 'next') ? ['resolved', 'resolvedAt', 'resolutionReason', 'resolutionHistory'] : [];
+    if (!hasOnlyKeys(item, [...entryKeys, ...resolutionKeys])) {
       return corrupt('unrecognized entry fields');
     }
     if (!isKind(item.kind)) return corrupt('invalid entry kind');
@@ -179,6 +191,18 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     } else if (item.questionId !== null) {
       return corrupt('unexpected question ID');
     }
+    if (schema >= 5 && (item.kind === 'gap' || item.kind === 'next')) {
+      const history = item.resolutionHistory;
+      if (!(item.resolved === undefined || item.resolved === null || item.resolved === true || item.resolved === false)) return corrupt('invalid entry resolution state');
+      if (item.resolved === true || item.resolved === false) {
+        if (!timestamp(item.resolvedAt) || !nonblank(item.resolutionReason) || !Array.isArray(history) || history.length === 0) return corrupt('invalid entry resolution');
+        if (history.some((event) => !object(event) || !timestamp(event.at) || !nonblank(event.reason) || !oneOf(event.state, ['resolved', 'reopened']))) return corrupt('invalid entry resolution history');
+        const last = history[history.length - 1];
+        if (!object(last) || last.at !== item.resolvedAt || last.state !== (item.resolved ? 'resolved' : 'reopened')) return corrupt('entry resolution does not match its history');
+      } else if ((item.resolvedAt ?? null) !== null || (item.resolutionReason ?? null) !== null || (item.resolutionHistory ?? null) !== null) {
+        return corrupt('invalid entry resolution');
+      }
+    }
     if (schema >= 5) {
       if (item.kind === 'scenario') {
         if (item.criterionId !== null && !nonblank(item.criterionId)) return corrupt('invalid scenario criterion ID');
@@ -191,6 +215,11 @@ export function decodeRecord(bytes: Uint8Array, location: string): WorkRecord {
     if (item.kind === 'question') questions.add(item.id);
     if (item.kind === 'criterion') criteria.add(item.id);
     if (item.kind === 'gap') gaps.add(item.id);
+    if (schema >= 5 && (item.kind === 'gap' || item.kind === 'next')) {
+      for (const key of ['resolved', 'resolvedAt', 'resolutionReason', 'resolutionHistory']) {
+        if (!(key in item)) item[key] = null;
+      }
+    }
   }
   if (answerTargets.some((id) => !questions.has(id))) return corrupt('answer refers to a missing question');
   if (scenarioTargets.some((id) => !criteria.has(id))) return corrupt('scenario refers to a missing criterion');
@@ -352,6 +381,8 @@ export interface Handoff {
   previousBaselineComparison: BaselineComparison | null;
   driftAssessments: DriftAssessmentView[];
   acceptance: AcceptanceView | null;
+  /** Every recorded acceptance, oldest first; the latest is also returned as `acceptance`. */
+  acceptanceHistory: Acceptance[];
   qaCoverage: QaCoverage;
   deliveryTargets: DeliveryTarget[];
   missingContext: string[];
@@ -367,9 +398,30 @@ export interface Handoff {
     scenarios: 'available';
     checkExpectation: 'available';
     questionResolution: 'not_available';
-    gapAndActionResolution: 'not_available';
+    gapAndActionResolution: 'available';
     planAndDecisionSupersession: 'not_available';
   };
+}
+
+/** Resolve or reopen a recorded gap or next action, keeping the full resolution history on the entry. */
+export function resolveEntry(record: WorkRecord, kind: 'gap' | 'next', id: string, outcome: { state: 'resolved' | 'reopened'; reason: string }): { record: WorkRecord; entry: Entry } {
+  const next = upgradeRecord(record);
+  const index = next.entries.findIndex((entry) => entry.kind === kind && entry.id === id);
+  if (index < 0) throw usageError(`${kind === 'gap' ? 'Gap' : 'Next action'} ${id} is not in this work record.`);
+  const entry = next.entries[index]!;
+  if (entry.resolved === true && outcome.state === 'resolved') throw usageError(`${kind === 'gap' ? 'Gap' : 'Next action'} ${id} is already resolved; reopen it before resolving again.`);
+  if (entry.resolved !== true && outcome.state === 'reopened') throw usageError(`${kind === 'gap' ? 'Gap' : 'Next action'} ${id} is not resolved; nothing to reopen.`);
+  const at = new Date().toISOString();
+  const resolved = {
+    ...entry,
+    resolved: outcome.state === 'resolved',
+    resolvedAt: at,
+    resolutionReason: outcome.reason,
+    resolutionHistory: [...(entry.resolutionHistory ?? []), { at, reason: outcome.reason, state: outcome.state }],
+  };
+  const entries = [...next.entries];
+  entries[index] = resolved;
+  return { record: { ...next, entries }, entry: resolved };
 }
 
 /** Recorded expectation vs recorded outcome: null when there is no expectation or no pass/fail outcome. */
@@ -479,14 +531,15 @@ export function makeHandoff(record: WorkRecord): Handoff {
     baselineComparison,
     previousBaselineComparison,
     driftAssessments: state.driftAssessments.map((assessment) => assessmentView(state, assessment, observations)),
-    acceptance: acceptanceView(state),
+    acceptance: acceptanceView(state, baselineComparison),
+    acceptanceHistory: state.acceptances,
     qaCoverage: computeQaCoverage(state, criteria, baselineComparison),
     deliveryTargets: state.deliveryTargets,
     missingContext: groups.filter(([, entries]) => entries.length === 0).map(([name]) => name),
     capabilities: {
       checks: 'available', evidence: 'available', evaluation: 'available',
       revisions: 'available', baselines: 'available', driftAssessment: 'available',
-      acceptance: 'available', practices: 'available', scenarios: 'available', checkExpectation: 'available', questionResolution: 'not_available', gapAndActionResolution: 'not_available',
+      acceptance: 'available', practices: 'available', scenarios: 'available', checkExpectation: 'available', questionResolution: 'not_available', gapAndActionResolution: 'available',
       planAndDecisionSupersession: 'not_available',
     },
   };

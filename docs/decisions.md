@@ -26,11 +26,18 @@
   recorded self-attestation with known gaps (`accept`); it is not proof a human
   was present, not a verification, and recording it does not depend on
   freshness. The handoff reports whether the latest acceptance is current or
-  needs reassessment by comparing recorded counts. Delegation remains
-  unavailable.
+  needs reassessment by comparing recorded counts, and qualifies that state as
+  a count comparison only. Selected-input changes and drift assessments or
+  delivery targets recorded after the acceptance are reported as separate
+  reassessment signals; they never change the state. All recorded acceptances
+  are exposed as history. Delegation remains unavailable.
 - **Claims and corrections.** Consequential claims are entries (`claim` kind).
   Corrections are explicit revisions that retain the original text; detecting
   a change is not judging its meaning, and SYNTH does not declare claims true.
+  **Accepted limit (audit AUD-04, per closed #14):** the claim and revision
+  model stays narrow on purpose — one revision supersedes the current text,
+  history is retained, and no verification, truth value, or supersession of
+  other entries is inferred from a correction.
 - **QA coverage.** Checks carry an optional case label (positive, negative,
   boundary, regression). The handoff summarizes criteria, checks by status and
   case, evidence, evaluations, drift findings, and residual risks (gaps,
@@ -47,7 +54,10 @@
   existing criterion; checks carry an optional caller expectation (`expect:
   pass|fail`) whose match with the recorded outcome is reported as
   `expectationMet` — a recorded comparison, not a judgment that the expectation
-  was correct.
+  was correct. **Accepted limit (audit AUD-05):** practice labels are
+  mechanical recorded comparisons over what the caller recorded — a `practice`
+  entry does not mean TDD or BDD was followed, and a scenario or expectation
+  match does not mean the practice was verified.
 - **Verification provenance and freshness.** Revision and dirty state are
   caller-reported or unknown; the CLI does not run Git implicitly. An optional
   SHA-256 snapshot covers one explicitly selected regular file at evidence
@@ -104,6 +114,23 @@
   container (#9, comment 6660791107), and the ubuntu-latest CI runner (run
   42041576167). Native Windows remains deferred and unverified. Platform targets
   are not evidence of platform validation; only the recorded runs above count.
+
+## Accepted audit limits
+
+The internal audit (AUD-01 … AUD-11, issues #32–#40) recorded two findings as
+accepted limits of the current model rather than defects to fix; both are noted
+where they apply above:
+
+- **AUD-04 — narrow claim and revision model** (per closed #14): one revision
+  supersedes the current text and history is retained; nothing else is inferred
+  from a correction.
+- **AUD-05 — practice labels are mechanical**: a `practice` entry, a scenario,
+  and an expectation match are recorded comparisons over what the caller
+  recorded, not verification that TDD or BDD was followed.
+
+The remaining audit findings were fixed as bugs or gaps in the PR that closed
+them. Pasting the real bodies into closed #20–#22 (their text was lost with the
+scratch files they were created from) needs a token with issue-write access.
 
 ## Open decisions
 

@@ -2,15 +2,15 @@
 import { readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput } from './domain.js';
+import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput, resolveEntry } from './domain.js';
 import { addDriftAssessment, addRevision, captureBaseline, compareBaselines, type BaselineArea, type DriftFinding } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
 import { hasErrorCode, SynthError, usageError } from './errors.js';
 import { snapshotFile } from './fingerprint.js';
-import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from './presentation.js';
+import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus, visibleText } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
 import { initializeRecord, readRecord, recordPath, updateRecord } from './storage.js';
-import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, type DirtyState, type Expectation, type Verdict } from './verification.js';
+import { addCheck, addEvidence, addEvaluation, completeCheck, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, reconcileCheck, type DirtyState, type Expectation, type Verdict } from './verification.js';
 import { addAcceptance, addDeliveryTarget, CASE_TYPES, DELIVERY_TARGETS, type CaseType, type DeliveryTargetKind } from './review.js';
 
 const CLI_VERSION = '0.1.0';
@@ -132,7 +132,7 @@ async function main(argv: string[]): Promise<void> {
     const outputJson = values.json === true;
     const writeSuccess = (name: string, data: unknown, human: string, version: number = OUTPUT_VERSION): void => {
       if (outputJson) process.stdout.write(`${JSON.stringify({ outputVersion: version, ok: true, command: name, data })}\n`);
-      else process.stdout.write(`${human}\n`);
+      else process.stdout.write(`${visibleText(human)}\n`);
     };
 
     if (values.help === true) {
@@ -155,6 +155,8 @@ async function main(argv: string[]): Promise<void> {
       revise: ['record', 'json', 'text', 'remove', 'reason', 'evidence'],
       baseline: ['record', 'json', 'reason', 'file', 'no-files', 'to', 'area', 'finding', 'evidence'],
       accept: ['record', 'json', 'statement', 'gap', 'reassess'],
+      resolve: ['record', 'json', 'reason'],
+      reopen: ['record', 'json', 'reason'],
       deliver: ['record', 'json', 'target', 'text', 'reason'],
     };
     const commandOptions = Object.hasOwn(allowed, command) ? allowed[command] : undefined;
@@ -255,14 +257,29 @@ async function main(argv: string[]): Promise<void> {
     }
     if (command === 'check') {
       const mode = positionals[1];
-      if (positionals.length !== 2 || (mode !== 'run' && mode !== 'record')) throw usageError('Use check run or check record.');
-      if (selectedArgv === null || selectedArgv.length === 0 || selectedArgv.length > 100 || !selectedArgv[0]?.trim() || selectedArgv.some((arg) => arg.includes('\0'))) {
-        throw usageError('Provide the selected executable and up to 99 arguments after --.');
-      }
-      const modeOptions = mode === 'run'
+      if (mode !== 'run' && mode !== 'record' && mode !== 'reconcile') throw usageError('Use check run, check record, or check reconcile.');
+      if (positionals.length !== (mode === 'reconcile' ? 3 : 2)) throw usageError(mode === 'reconcile' ? 'Use check reconcile <id> --status skipped|inconclusive --reason <text>.' : 'Use check run or check record with an executable after --.');
+      const modeOptions = mode === 'reconcile'
+        ? ['record', 'json', 'status', 'reason']
+        : mode === 'run'
         ? ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'timeout-ms', 'capture-output', 'output-ref', 'case', 'expect']
         : ['record', 'json', 'criterion', 'cwd', 'revision', 'dirty', 'status', 'reason', 'output-ref', 'case', 'expect'];
       for (const option of usedOptions) if (!modeOptions.includes(option)) throw usageError(`Option --${option} is not valid for check ${mode}.`);
+      if (mode === 'reconcile') {
+        const id = positionals[2]!;
+        if (!/^CHK[1-9][0-9]*$/.test(id)) throw usageError('Provide the pending check ID to reconcile, e.g. CHK1.');
+        if (values.status !== 'skipped' && values.status !== 'inconclusive') throw usageError('A reconciliation must report --status skipped or inconclusive.');
+        const reason = requiredText(values.reason, '--reason');
+        const check = updateRecord(location, (record) => {
+          const next = reconcileCheck(record, id, { status: values.status as 'skipped' | 'inconclusive', reason });
+          return { record: next.record, result: next.check };
+        });
+        writeSuccess(command, { recordPath: location, check }, `Reconciled pending check ${check.id} as ${check.status}; the pending request stays in the record.`);
+        return;
+      }
+      if (selectedArgv === null || selectedArgv.length === 0 || selectedArgv.length > 100 || !selectedArgv[0]?.trim() || selectedArgv.some((arg) => arg.includes('\0'))) {
+        throw usageError('Provide the selected executable and up to 99 arguments after --.');
+      }
       const caseType = values.case === undefined ? null : values.case;
       if (caseType !== null && !CASE_TYPES.includes(caseType as CaseType)) throw usageError('--case must be positive, negative, boundary, or regression.');
       const expect = values.expect === undefined ? null : values.expect;
@@ -361,6 +378,21 @@ async function main(argv: string[]): Promise<void> {
       writeSuccess(command, { recordPath: location, acceptance }, `Recorded ${acceptance.kind} acceptance ${acceptance.id} with ${acceptance.knownGapIds.length} known gap(s); it is a recorded self-attestation, not proof of presence or verification.`);
       return;
     }
+    if (command === 'resolve' || command === 'reopen') {
+      const kind = positionals[1];
+      if (kind !== 'gap' && kind !== 'next') throw usageError('Use resolve gap <id>, reopen gap <id>, resolve next <id>, or reopen next <id>.');
+      if (positionals.length !== 3) throw usageError(`Use ${command} ${kind} <id> --reason <text>.`);
+      const id = positionals[2]!;
+      if (!/^(G|N)[1-9][0-9]*$/.test(id)) throw usageError('Provide the gap or next-action ID, e.g. G1 or N1.');
+      const reason = requiredText(values.reason, '--reason');
+      const state = command === 'resolve' ? 'resolved' : 'reopened';
+      const entry = updateRecord(location, (record) => {
+        const next = resolveEntry(record, kind as 'gap' | 'next', id, { state, reason });
+        return { record: next.record, result: next.entry };
+      });
+      writeSuccess(command, { recordPath: location, entry }, `Recorded ${command === 'resolve' ? 'resolution' : 'reopening'} of ${kind} ${entry.id} at ${entry.resolvedAt}; earlier resolution state stays in history.`);
+      return;
+    }
     if (command === 'deliver') {
       if (positionals.length !== 1) throw usageError('deliver does not accept positional arguments.');
       const target = values.target;
@@ -386,7 +418,7 @@ async function main(argv: string[]): Promise<void> {
     const failure = error instanceof SynthError ? error : new SynthError('INTERNAL_ERROR', 'Unexpected error. Inspect the work record before retrying.', 1);
     if (jsonRequested) {
       process.stderr.write(`${JSON.stringify({ outputVersion: OUTPUT_VERSION, ok: false, command, error: { code: failure.code, message: failure.message } })}\n`);
-    } else process.stderr.write(`${failure.code}: ${failure.message}\n`);
+    } else process.stderr.write(`${failure.code}: ${visibleText(failure.message)}\n`);
     process.exitCode = failure.exitCode;
   }
 }

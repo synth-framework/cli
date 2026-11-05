@@ -2,7 +2,7 @@ import type { CriterionView, WorkRecord, WorkRecordV5 } from './domain.js';
 import type { BaselineComparison } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
-import { keys, nextId, nonblank, object, optionalText, references, timestamp, validCount, validId } from './validate.js';
+import { keys, nextId, nonblank, object, oneOf, optionalText, references, timestamp, validCount, validId } from './validate.js';
 
 /** Optional case label for a check, so negative and boundary coverage is visible. */
 export type CaseType = 'positive' | 'negative' | 'boundary' | 'regression';
@@ -16,7 +16,9 @@ export const DELIVERY_TARGETS: readonly DeliveryTargetKind[] = ['code', 'pr-hand
  * A recorded acceptance is an explicit human self-attestation with known gaps.
  * It is not proof a human was present, not a verification, and not delegation.
  * Recording does not depend on freshness; the counts snapshot lets the handoff
- * tell whether anything relevant changed since the acceptance was recorded.
+ * compare recorded counts since the acceptance. Anything outside the counts —
+ * selected inputs, later drift assessments or delivery targets — is reported
+ * as a separate signal, never folded into the state.
  */
 export interface Acceptance {
   id: string;
@@ -34,9 +36,30 @@ export interface Acceptance {
   evaluationCount: number;
 }
 
+/**
+ * Signals a reader may weigh when deciding to reassess, reported separately
+ * from the state. The state itself stays a count comparison (approved
+ * decision); these never change it.
+ */
+export interface AcceptanceReassessmentSignals {
+  /** Recorded counts that no longer match the acceptance snapshot; this is what drives `state`. */
+  changedCounts: string[];
+  /** Selected baseline inputs that changed or could not be compared; null when no baseline is recorded. */
+  changedSelectedInputs: number | null;
+  unknownSelectedInputs: number | null;
+  /** Drift assessments and delivery targets recorded after the acceptance. */
+  laterDriftAssessments: number;
+  laterDeliveryTargets: number;
+}
+
 export interface AcceptanceView extends Acceptance {
   state: 'current' | 'reassessment_needed';
+  /** Machine-readable qualifier: the state compares recorded counts, nothing else. */
+  stateBasis: 'count comparison only';
+  /** The qualified state, for machine consumers and short human output alike. */
+  stateLabel: 'current (count comparison only)' | 'reassessment needed (count comparison only)';
   changedSince: string[];
+  reassessmentSignals: AcceptanceReassessmentSignals;
 }
 
 export interface DeliveryTarget {
@@ -95,7 +118,7 @@ export function validateReview(value: Record<string, unknown>, gapIds: Set<strin
   for (const raw of value.deliveryTargets as unknown[]) {
     if (!object(raw) || !keys(raw, ['id', 'target', 'text', 'reason', 'recordedAt', 'entryCount'])) corrupt('invalid delivery target fields');
     if (!validId(raw.id, 'T') || targetIds.has(raw.id)) corrupt('invalid or duplicate delivery target ID');
-    if (!DELIVERY_TARGETS.includes(raw.target as DeliveryTargetKind) || !nonblank(raw.text) || !optionalText(raw.reason) || !timestamp(raw.recordedAt) || !validCount(raw.entryCount, (value.entries as unknown[]).length)) corrupt('invalid delivery target');
+    if (!oneOf(raw.target, DELIVERY_TARGETS) || !nonblank(raw.text) || !optionalText(raw.reason) || !timestamp(raw.recordedAt) || !validCount(raw.entryCount, (value.entries as unknown[]).length)) corrupt('invalid delivery target');
     targetIds.add(raw.id as string);
   }
 }
@@ -142,8 +165,13 @@ export function addDeliveryTarget(record: WorkRecord, input: DeliveryTargetInput
   return { record: { ...next, deliveryTargets: [...next.deliveryTargets, deliveryTarget] }, target: deliveryTarget };
 }
 
-/** Compare the acceptance snapshot counts with the current record; no timestamps are trusted. */
-export function acceptanceView(state: WorkRecordV5): AcceptanceView | null {
+/**
+ * Compare the acceptance snapshot counts with the current record; no file
+ * timestamps are trusted. The state stays a count comparison, so selected
+ * inputs, drift assessments, and delivery targets are reported as separate
+ * signals instead of flipping it.
+ */
+export function acceptanceView(state: WorkRecordV5, comparison: BaselineComparison | null = null): AcceptanceView | null {
   const latest = state.acceptances.at(-1);
   if (!latest) return null;
   const changedSince: string[] = [];
@@ -154,7 +182,23 @@ export function acceptanceView(state: WorkRecordV5): AcceptanceView | null {
   if (state.checks.length !== latest.checkCount || completed !== latest.completedCheckCount) changedSince.push('checks');
   if (state.evidence.length !== latest.evidenceCount) changedSince.push('evidence');
   if (state.evaluations.length !== latest.evaluationCount) changedSince.push('evaluations');
-  return { ...latest, state: changedSince.length === 0 ? 'current' : 'reassessment_needed', changedSince };
+  const selectedFiles = comparison ? Object.values(comparison.areas).flatMap((area) => area.files) : null;
+  const recordedAfter = (at: string): boolean => at > latest.recordedAt;
+  const stateName: AcceptanceView['state'] = changedSince.length === 0 ? 'current' : 'reassessment_needed';
+  return {
+    ...latest,
+    state: stateName,
+    stateBasis: 'count comparison only',
+    stateLabel: stateName === 'current' ? 'current (count comparison only)' : 'reassessment needed (count comparison only)',
+    changedSince,
+    reassessmentSignals: {
+      changedCounts: changedSince,
+      changedSelectedInputs: selectedFiles ? selectedFiles.filter((file) => file.change === 'changed' || file.change === 'selection_added' || file.change === 'selection_removed').length : null,
+      unknownSelectedInputs: selectedFiles ? selectedFiles.filter((file) => file.change === 'unknown').length : null,
+      laterDriftAssessments: state.driftAssessments.filter((item) => recordedAfter(item.createdAt)).length,
+      laterDeliveryTargets: state.deliveryTargets.filter((item) => recordedAfter(item.recordedAt)).length,
+    },
+  };
 }
 
 /** Coverage summary: what was checked, with what evidence, plus findings and residual risks. */
@@ -184,7 +228,7 @@ export function computeQaCoverage(state: WorkRecordV5, criteria: readonly Criter
       unintendedOrUncertain: state.driftAssessments.filter((item) => item.finding === 'unintended' || item.finding === 'uncertain').length,
     },
     risks: {
-      openGaps: state.entries.filter((entry) => entry.kind === 'gap').length,
+      openGaps: state.entries.filter((entry) => entry.kind === 'gap' && entry.resolved !== true).length,
       unknownSelectedFiles: comparison ? Object.values(comparison.areas).reduce((sum, area) => sum + area.unknownFileCount, 0) : null,
     },
     practices: state.entries.filter((entry) => entry.kind === 'practice').map((entry) => entry.text),

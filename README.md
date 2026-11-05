@@ -3,9 +3,12 @@
 SYNTH is an agent-first CLI for keeping a bounded work intention and its
 context available to a developer and coding agent. It captures and resumes
 work, runs explicitly selected checks, records attributed evidence and criterion
-evaluations, and compares optional baselines. It does **not** record formal
-review findings or acceptance. A check, evidence item, evaluation, drift
-assessment, and acceptance are different things.
+evaluations, compares optional baselines, and records acceptance as a
+self-attestation with known gaps. A check, evidence item, evaluation, drift
+assessment, and acceptance are different things: SYNTH records each one
+separately and never promotes one into another. It does not record formal
+review findings, and a recorded acceptance is not proof of presence,
+verification, or delegation.
 
 The CLI targets Node.js 22+ on macOS and Linux, including agent workspaces.
 Platform targets are not a claim that a particular environment was tested.
@@ -203,7 +206,13 @@ records a new acceptance after relevant changes. The handoff and status report
 whether the latest acceptance is `current` or `reassessment_needed`, listing
 what changed since (entries, revisions, baselines, checks — including a check
 that only just completed, since `completeCheck` rewrites in place — evidence,
-evaluations) by comparing recorded counts — not timestamps.
+evaluations) by comparing recorded counts — not timestamps. That state is
+qualified as a count comparison only (`stateBasis`, `stateLabel`), and
+everything the counts cannot see is reported separately in
+`reassessmentSignals`: changed and unknown selected inputs, plus drift
+assessments and delivery targets recorded after the acceptance — signals that
+never change the state. Every recorded acceptance is listed in
+`acceptanceHistory`; the latest one is also returned as `acceptance`.
 
 `synth deliver --target code|pr-handoff|artifact|documentation|deployment|observed-outcome --text '...'`
 records a delivery **goal**. Delivery targets are kept separate from recorded
@@ -389,3 +398,9 @@ export PATH="$PWD/node_modules/.bin:$PATH"
 
 The fixture is disposable and independent of the source checkout. Remove the
 chosen temporary directory yourself when finished.
+
+## License
+
+MIT — see [LICENSE](LICENSE). `npm pack` builds `dist/` first (`prepack`), so a
+tarball from a clean checkout always ships the `synth` executable, the license,
+and these docs.

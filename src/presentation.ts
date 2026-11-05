@@ -1,4 +1,5 @@
 import type { CriterionView, Entry, Handoff } from './domain.js';
+import type { AcceptanceReassessmentSignals } from './review.js';
 import type { BaselineComparison } from './baseline.js';
 
 export const HELP = `SYNTH — local work continuity for a developer and coding agent
@@ -18,6 +19,11 @@ Usage:
     --status skipped|inconclusive --reason <text>
     [--cwd <path>] [--revision <text>] [--dirty clean|dirty|unknown] [--output-ref <reference>]
     [--record <path>] [--json] -- <executable> [arguments...]
+  synth check reconcile <id> --status skipped|inconclusive --reason <text> [--record <path>] [--json]
+  synth resolve gap <id> --reason <text> [--record <path>] [--json]
+  synth reopen gap <id> --reason <text> [--record <path>] [--json]
+  synth resolve next <id> --reason <text> [--record <path>] [--json]
+  synth reopen next <id> --reason <text> [--record <path>] [--json]
   synth evidence add [--criterion <id>] --summary <text> --source <text>
     --subject <text> --limitations <text> [--check <id>] [--revision <text>]
     [--artifact <reference>] [--subject-file <path>] [--record <path>] [--json]
@@ -66,8 +72,12 @@ Claims are consequential recorded statements; correct them with revise, which
 retains the original text in history. Detecting a change is not judging its
 meaning. Acceptance is a recorded self-attestation with known gaps (accept);
 it is not proof a human was present, not verification, and not delegation, and
-recording it does not depend on freshness. The handoff shows whether anything
-relevant changed since acceptance (reassessment needed) or it is current.
+recording it does not depend on freshness. The handoff compares the recorded
+counts taken at acceptance with the record now: reassessment needed when a
+compared count changed, otherwise current. That comparison counts only — it
+does not judge meaning, and it does not look at selected file contents, drift
+assessments, or delivery targets; those are reported as separate reassessment
+signals alongside it.
 Delivery targets (deliver) are goals — code, PR handoff, artifact,
 documentation, deployment, observed outcome — recorded separately from
 activities; one is never inferred from another.
@@ -105,6 +115,9 @@ function renderEntries(title: string, entries: readonly Entry[], options: { deci
     const revised = 'active' in entry && 'revisionId' in entry && 'originalText' in entry ? entry as Entry & { active: boolean; revisionId: string | null; originalText: string } : null;
     lines.push(`  ${entry.id}${revised && !revised.active ? ' [removed]' : ''}: ${indented(entry.text)}`);
     if (revised?.revisionId) lines.push(`    Current revision: ${revised.revisionId}; original: ${indented(revised.originalText, '      ')}`);
+    if (entry.resolved === true) lines.push(`    Resolved at ${entry.resolvedAt}; reason: ${indented(entry.resolutionReason ?? '', '      ')}.`);
+    else if (entry.resolved === false) lines.push(`    Reopened at ${entry.resolvedAt}; reason: ${indented(entry.resolutionReason ?? '', '      ')}.`);
+    if (entry.resolutionHistory && entry.resolutionHistory.length > 0) lines.push(`    Resolution history: ${entry.resolutionHistory.map((event) => `${event.state} at ${event.at}`).join('; ')}.`);
     if (entry.reason !== null) lines.push(`    Reason: ${indented(entry.reason, '      ')}`);
     else if (options.decisions) lines.push('    Reason: not recorded.');
   }
@@ -140,6 +153,7 @@ function renderChecks(handoff: Handoff): string {
     if (check.outputRef !== null) lines.push(`    Output reference (not inspected): ${indented(check.outputRef, '      ')}`);
     if (check.output !== null) lines.push(`    Output: ${check.output.captured ? 'captured (may contain sensitive data)' : 'not captured'}; stdout ${check.output.stdout.bytes} bytes${check.output.stdout.truncated ? ' (truncated)' : ''}, stderr ${check.output.stderr.bytes} bytes${check.output.stderr.truncated ? ' (truncated)' : ''}.`);
     if (check.status === 'pending') lines.push('    Outcome not recorded; the command may or may not have started. Inspect before retrying.');
+    if (check.reconciledAt !== null) lines.push(`    Reconciled from pending at ${check.reconciledAt} (requested at ${check.requestedAt}); reported outcome, not run by SYNTH.`);
   }
   return lines.join('\n');
 }
@@ -157,6 +171,20 @@ function renderEvidence(handoff: Handoff): string {
     if (item.subjectFile !== null) lines.push(`    Subject file: ${item.subjectFile.path}; snapshot: ${item.subjectFile.state}${item.subjectFile.reason ? ` (${item.subjectFile.reason})` : ''}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * Render control characters visibly in human output so untrusted record text
+ * cannot inject terminal controls (AUD-09). JSON output is never passed
+ * through this; it stays raw (and JSON.stringify already escapes controls).
+ */
+export function visibleText(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, (ch) => {
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) return String.fromCharCode(0x2400 + code);
+    if (code === 0x7f) return '\u2421';
+    return String.fromCharCode(0x2400 + (code - 0x40));
+  });
 }
 
 export function renderComparison(comparison: BaselineComparison): string {
@@ -203,17 +231,29 @@ function renderQaCoverage(handoff: Handoff): string {
   ].join('\n');
 }
 
+/** Selected-input and later-record signals: reported next to the state, never part of the count comparison. */
+function renderAcceptanceSignals(signals: AcceptanceReassessmentSignals): string {
+  const shown = (value: number | null): string => (value === null ? 'not compared (no baseline recorded)' : String(value));
+  return `changed selected inputs: ${shown(signals.changedSelectedInputs)}; unknown selected inputs: ${shown(signals.unknownSelectedInputs)}; drift assessments recorded since: ${signals.laterDriftAssessments}; delivery targets recorded since: ${signals.laterDeliveryTargets}`;
+}
+
 function renderAcceptance(handoff: Handoff): string {
   const acceptance = handoff.acceptance;
   if (!acceptance) return 'Acceptance: not recorded. Acceptance would be a recorded self-attestation, not verification.';
-  const state = acceptance.state === 'current'
-    ? 'current (nothing recorded since it was recorded has changed the compared counts)'
-    : `reassessment needed; changed since ${acceptance.id}: ${acceptance.changedSince.join(', ')}`;
+  const changed = acceptance.changedSince.length === 0 ? 'no compared count changed' : `changed counts: ${acceptance.changedSince.join(', ')}`;
+  const earlier = handoff.acceptanceHistory.filter((item) => item.id !== acceptance.id);
   return [
     `Acceptance (recorded self-attestation ${acceptance.id} [${acceptance.kind}]; not proof of presence, verification, or delegation):`,
     `  Statement: ${indented(acceptance.statement, '    ')}`,
     `  Known gaps: ${acceptance.knownGapIds.join(', ') || 'none recorded'}; recorded: ${acceptance.recordedAt}.`,
-    `  State: ${state}.`,
+    `  State: ${acceptance.stateLabel}; ${changed}.`,
+    `  Reassessment signals (reported separately, not part of the count comparison): ${renderAcceptanceSignals(acceptance.reassessmentSignals)}.`,
+    ...(earlier.length > 0
+      ? [
+          `  Earlier acceptances retained in the record (${earlier.length}; superseded by ${acceptance.id}, not applied to it):`,
+          ...earlier.map((item) => `    ${item.id} [${item.kind}] recorded ${item.recordedAt}: ${indented(item.statement, '      ')}`),
+        ]
+      : ['  Earlier acceptances: none; this is the only recorded acceptance.']),
   ].join('\n');
 }
 
@@ -326,7 +366,12 @@ export function renderStatus(location: string, handoff: Handoff): string {
     `Practices: ${handoff.practices.map((item) => item.text).join(', ') || 'not recorded'}; scenarios: ${handoff.scenarios.length} recorded (${handoff.scenarios.filter((item) => item.criterionId !== null).length} linked to a criterion).`,
     handoff.acceptance === null
       ? 'Acceptance: not recorded.'
-      : `Acceptance: ${handoff.acceptance.id} [${handoff.acceptance.kind}] is ${handoff.acceptance.state}${handoff.acceptance.state === 'reassessment_needed' ? `; changed since: ${handoff.acceptance.changedSince.join(', ')}` : ''}; known gaps: ${handoff.acceptance.knownGapIds.join(', ') || 'none'}.`,
+      : [
+          `Acceptance: ${handoff.acceptance.id} [${handoff.acceptance.kind}] is ${handoff.acceptance.stateLabel}`,
+          handoff.acceptance.changedSince.length > 0 ? `; changed counts: ${handoff.acceptance.changedSince.join(', ')}` : '; no compared count changed',
+          `; known gaps: ${handoff.acceptance.knownGapIds.join(', ') || 'none'}`,
+          `. Reassessment signals (not part of the count comparison): ${renderAcceptanceSignals(handoff.acceptance.reassessmentSignals)}.`,
+        ].join(''),
     handoff.deliveryTargets.length === 0
       ? 'Delivery targets: not recorded.'
       : `Delivery targets (goals, not outcomes): ${handoff.deliveryTargets.map((item) => `${item.id} ${item.target}`).join(', ')}.`,

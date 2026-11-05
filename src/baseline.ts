@@ -2,7 +2,7 @@ import type { Entry, EntryKind, WorkRecord, WorkRecordV5 } from './domain.js';
 import { upgradeRecord } from './evolution.js';
 import { usageError } from './errors.js';
 import { isFileSnapshot, snapshotFile, type FileSnapshot } from './fingerprint.js';
-import { keys, nextId, nonblank, object, optionalText, references, timestamp, validCount, validId } from './validate.js';
+import { keys, nextId, nonblank, object, oneOf, optionalText, references, timestamp, validCount, validId } from './validate.js';
 
 export const MAX_BASELINE_FILES = 20;
 export type BaselineArea = 'intention' | 'scope' | 'criteria' | 'verification';
@@ -199,8 +199,8 @@ export function validateBaseline(value: Record<string, unknown>, corrupt: (detai
   let lastBaselineCount = 0;
   for (const raw of assessments) {
     if (!object(raw) || !keys(raw, ['id', 'baselineId', 'area', 'finding', 'reason', 'evidenceIds', 'entryCount', 'revisionCount', 'evidenceCount', 'baselineCount', 'files', 'createdAt'])) corrupt('invalid drift assessment fields');
-    if (!validId(raw.id, 'DA') || assessmentIds.has(raw.id) || !['intention', 'scope', 'criteria', 'verification'].includes(String(raw.area)) ||
-        !['intentional', 'unintended', 'uncertain', 'no_concern'].includes(String(raw.finding)) || !nonblank(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid drift assessment');
+    if (!validId(raw.id, 'DA') || assessmentIds.has(raw.id) || !oneOf(raw.area, ['intention', 'scope', 'criteria', 'verification']) ||
+        !oneOf(raw.finding, ['intentional', 'unintended', 'uncertain', 'no_concern']) || !nonblank(raw.reason) || !timestamp(raw.createdAt)) corrupt('invalid drift assessment');
     if (!validPrefixes(raw.entryCount, raw.revisionCount) || !revisionsCiteIncludedEvidence(raw.revisionCount, raw.evidenceCount) ||
         !validCount(raw.evidenceCount, evidence.length) || !validCount(raw.baselineCount, baselines.length) ||
         (raw.entryCount as number) < lastEntryCount || (raw.revisionCount as number) < lastRevisionCount ||
