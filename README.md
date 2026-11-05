@@ -9,8 +9,8 @@ assessment, and acceptance are different things.
 
 The CLI targets Node.js 22+ on macOS and Linux, including agent workspaces.
 Platform targets are not a claim that a particular environment was tested.
-Native Windows is deferred and WSL2 is provisional. Core CLI operations use no
-network. The agent itself may be online.
+Native Windows is deferred; WSL2 is validated (see *Recorded validation
+results* below). Core CLI operations use no network. The agent itself may be online.
 
 ## Agent-facing quick start
 
@@ -354,6 +354,21 @@ Record the OS, Node version, and actual test output; a Linux result or the
 macOS design target is not a substitute for running this procedure on macOS.
 A separate remote workspace/container should likewise be reported as tested
 only after the procedure is run there.
+
+### Recorded validation results
+
+These procedures have been run on real machines and containers, each passing
+the full suite (80/80 tests, 0 skipped) on the tree merged as `ef802f9`:
+
+- macOS 15.7.4 (x86_64, Darwin 24.6.0), Node v22 — issue #26, comment 6660008615
+- Windows/WSL2 (Ubuntu 26.04, WSL 3.0.3.0, kernel 6.18.54.1-microsoft-standard-WSL2),
+  Node v22.22.1 — issue #26, comment 6662110107
+- remote Linux container: `node:22-bookworm` (digest sha256:f6f56d63…), OrbStack
+  LinuxVM kernel 6.7.11, Node v22.23.4 — issue #9, comment 6660791107
+- remote CI runner: ubuntu-latest, run 42041576167 on `ef802f9`
+
+Native Windows remains deferred and unverified. Report new platform results in
+the backlog issues rather than by editing this list.
 
 For an interactive fixture walkthrough from the repository root, first choose a
 `TMPDIR` outside the checkout and outside Git repository ancestors, and run in a
