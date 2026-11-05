@@ -15,6 +15,7 @@ synchronization.
 - [Milestone #3 — Slice 3 — Review, correct, and reassess](https://github.com/synth-framework/cli/milestone/3)
 - [Milestone #4 — Slice 4 — Exercise quality practices](https://github.com/synth-framework/cli/milestone/4)
 - [Milestone #5 — Final stage — platform validation (macOS, Windows/WSL2)](https://github.com/synth-framework/cli/milestone/5)
+- [Milestone #6 — Slice 5 — audit hardening + npm distribution prep](https://github.com/synth-framework/cli/milestone/6)
 
 ## Issues
 
@@ -51,6 +52,18 @@ synchronization.
 ### Final stage
 
 - [#26 FV-01: Final-stage platform validation on macOS and Windows/WSL2](https://github.com/synth-framework/cli/issues/26)
+
+### Slice 5 — audit hardening + npm distribution prep
+
+- [#32 AUD-01: timeout escalation must cover same-group descendants that ignore SIGTERM](https://github.com/synth-framework/cli/issues/32)
+- [#33 AUD-06: explicit resolution/reopening of gaps and next actions](https://github.com/synth-framework/cli/issues/33)
+- [#34 AUD-03: qualify count-only acceptance state in status/JSON/help](https://github.com/synth-framework/cli/issues/34)
+- [#35 AUD-02: prepare npm distribution (MIT license, prepack safeguard, package-content test)](https://github.com/synth-framework/cli/issues/35)
+- [#36 AUD-08: open work record without following a final symlink (TOCTOU)](https://github.com/synth-framework/cli/issues/36)
+- [#37 AUD-09: escape terminal control sequences in human-rendered record text](https://github.com/synth-framework/cli/issues/37)
+- [#38 AUD-10: malformed enum/object fields must be RECORD_CORRUPT not INTERNAL_ERROR](https://github.com/synth-framework/cli/issues/38)
+- [#39 AUD-07: explicit reconciliation for pending checks](https://github.com/synth-framework/cli/issues/39)
+- [#40 AUD-11: reconcile docs and issue-evidence leftovers](https://github.com/synth-framework/cli/issues/40)
 
 ## Housekeeping notes
 
