@@ -381,6 +381,8 @@ export interface Handoff {
   previousBaselineComparison: BaselineComparison | null;
   driftAssessments: DriftAssessmentView[];
   acceptance: AcceptanceView | null;
+  /** Every recorded acceptance, oldest first; the latest is also returned as `acceptance`. */
+  acceptanceHistory: Acceptance[];
   qaCoverage: QaCoverage;
   deliveryTargets: DeliveryTarget[];
   missingContext: string[];
@@ -529,7 +531,8 @@ export function makeHandoff(record: WorkRecord): Handoff {
     baselineComparison,
     previousBaselineComparison,
     driftAssessments: state.driftAssessments.map((assessment) => assessmentView(state, assessment, observations)),
-    acceptance: acceptanceView(state),
+    acceptance: acceptanceView(state, baselineComparison),
+    acceptanceHistory: state.acceptances,
     qaCoverage: computeQaCoverage(state, criteria, baselineComparison),
     deliveryTargets: state.deliveryTargets,
     missingContext: groups.filter(([, entries]) => entries.length === 0).map(([name]) => name),

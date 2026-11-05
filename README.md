@@ -203,7 +203,13 @@ records a new acceptance after relevant changes. The handoff and status report
 whether the latest acceptance is `current` or `reassessment_needed`, listing
 what changed since (entries, revisions, baselines, checks — including a check
 that only just completed, since `completeCheck` rewrites in place — evidence,
-evaluations) by comparing recorded counts — not timestamps.
+evaluations) by comparing recorded counts — not timestamps. That state is
+qualified as a count comparison only (`stateBasis`, `stateLabel`), and
+everything the counts cannot see is reported separately in
+`reassessmentSignals`: changed and unknown selected inputs, plus drift
+assessments and delivery targets recorded after the acceptance — signals that
+never change the state. Every recorded acceptance is listed in
+`acceptanceHistory`; the latest one is also returned as `acceptance`.
 
 `synth deliver --target code|pr-handoff|artifact|documentation|deployment|observed-outcome --text '...'`
 records a delivery **goal**. Delivery targets are kept separate from recorded

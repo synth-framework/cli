@@ -632,6 +632,62 @@ test('resolution works on records migrated from older schemas (AUD-06)', () => {
   assert.equal(handoff.gaps[0].resolved, true);
 });
 
+test('acceptance state is qualified, and selected-input and later-record signals stay separate (AUD-03)', () => {
+  const dir = fixture();
+  initialize(dir);
+  const target = join(dir, 'selected-input.txt');
+  writeFileSync(target, 'original selected content');
+  jsonSuccess(run(dir, ['baseline', 'capture', '--file', target, '--json']), 'baseline');
+  jsonSuccess(run(dir, ['accept', '--statement', 'Accepted while the selected file is unchanged', '--json']), 'accept');
+  // The audit probe: a selected file changed after acceptance. The state stays a
+  // count comparison, so it remains current and the change is reported as a signal.
+  writeFileSync(target, 'selected content changed after acceptance');
+  let handoff = jsonSuccess(run(dir, ['status', '--json']), 'status').handoff;
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.stateBasis, 'count comparison only');
+  assert.equal(handoff.acceptance.stateLabel, 'current (count comparison only)');
+  assert.deepEqual(handoff.acceptance.changedSince, []);
+  assert.deepEqual(handoff.acceptance.reassessmentSignals, {
+    changedCounts: [], changedSelectedInputs: 1, unknownSelectedInputs: 0, laterDriftAssessments: 0, laterDeliveryTargets: 0,
+  });
+  // A drift assessment and a delivery target recorded later are reported, never folded into the state.
+  jsonSuccess(run(dir, ['baseline', 'assess', 'B1', '--area', 'verification', '--finding', 'unintended', '--reason', 'Verification area grew', '--json']), 'baseline');
+  jsonSuccess(run(dir, ['deliver', '--target', 'code', '--text', 'Handoff-ready slice', '--json']), 'deliver');
+  handoff = jsonSuccess(run(dir, ['status', '--json']), 'status').handoff;
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDriftAssessments, 1);
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDeliveryTargets, 1);
+  let human = run(dir, ['status']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /is current \(count comparison only\)/);
+  assert.match(human.stdout, /drift assessments recorded since: 1; delivery targets recorded since: 1/);
+  // A changed count still drives the state, and the qualified label follows it.
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Recorded after acceptance', '--json']), 'add');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.acceptance.state, 'reassessment_needed');
+  assert.equal(handoff.acceptance.stateLabel, 'reassessment needed (count comparison only)');
+  assert.deepEqual(handoff.acceptance.changedSince, ['entries']);
+  assert.deepEqual(handoff.acceptance.reassessmentSignals.changedCounts, ['entries']);
+  // Prior acceptances are exposed instead of only the latest one.
+  jsonSuccess(run(dir, ['accept', '--statement', 'Reassessed after the new gap', '--gap', 'G1', '--reassess', '--json']), 'accept');
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.deepEqual(handoff.acceptanceHistory.map((item) => `${item.id}:${item.kind}`), ['AC1:initial', 'AC2:reassessment']);
+  assert.equal(handoff.acceptance.id, 'AC2');
+  assert.equal(handoff.acceptance.state, 'current');
+  assert.equal(handoff.acceptance.reassessmentSignals.laterDriftAssessments, 0);
+  human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Earlier acceptances retained in the record \(1; superseded by AC2/);
+  assert.match(human.stdout, /AC1 \[initial\] recorded /);
+  // Help no longer claims the handoff judges whether anything relevant changed.
+  const help = run(dir, ['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  const helpText = help.stdout.replaceAll('␊', '\n');
+  assert.doesNotMatch(helpText, /anything\s+relevant/i);
+  assert.match(helpText, /counts only/);
+  assert.match(helpText, /separate reassessment\s+signals/);
+});
+
 test('hostile non-string enum fields are corrupt records, never stringified (AUD-10)', () => {
   const dir = fixture();
   initialize(dir);

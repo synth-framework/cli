@@ -1,4 +1,5 @@
 import type { CriterionView, Entry, Handoff } from './domain.js';
+import type { AcceptanceReassessmentSignals } from './review.js';
 import type { BaselineComparison } from './baseline.js';
 
 export const HELP = `SYNTH — local work continuity for a developer and coding agent
@@ -71,8 +72,12 @@ Claims are consequential recorded statements; correct them with revise, which
 retains the original text in history. Detecting a change is not judging its
 meaning. Acceptance is a recorded self-attestation with known gaps (accept);
 it is not proof a human was present, not verification, and not delegation, and
-recording it does not depend on freshness. The handoff shows whether anything
-relevant changed since acceptance (reassessment needed) or it is current.
+recording it does not depend on freshness. The handoff compares the recorded
+counts taken at acceptance with the record now: reassessment needed when a
+compared count changed, otherwise current. That comparison counts only — it
+does not judge meaning, and it does not look at selected file contents, drift
+assessments, or delivery targets; those are reported as separate reassessment
+signals alongside it.
 Delivery targets (deliver) are goals — code, PR handoff, artifact,
 documentation, deployment, observed outcome — recorded separately from
 activities; one is never inferred from another.
@@ -226,17 +231,29 @@ function renderQaCoverage(handoff: Handoff): string {
   ].join('\n');
 }
 
+/** Selected-input and later-record signals: reported next to the state, never part of the count comparison. */
+function renderAcceptanceSignals(signals: AcceptanceReassessmentSignals): string {
+  const shown = (value: number | null): string => (value === null ? 'not compared (no baseline recorded)' : String(value));
+  return `changed selected inputs: ${shown(signals.changedSelectedInputs)}; unknown selected inputs: ${shown(signals.unknownSelectedInputs)}; drift assessments recorded since: ${signals.laterDriftAssessments}; delivery targets recorded since: ${signals.laterDeliveryTargets}`;
+}
+
 function renderAcceptance(handoff: Handoff): string {
   const acceptance = handoff.acceptance;
   if (!acceptance) return 'Acceptance: not recorded. Acceptance would be a recorded self-attestation, not verification.';
-  const state = acceptance.state === 'current'
-    ? 'current (nothing recorded since it was recorded has changed the compared counts)'
-    : `reassessment needed; changed since ${acceptance.id}: ${acceptance.changedSince.join(', ')}`;
+  const changed = acceptance.changedSince.length === 0 ? 'no compared count changed' : `changed counts: ${acceptance.changedSince.join(', ')}`;
+  const earlier = handoff.acceptanceHistory.filter((item) => item.id !== acceptance.id);
   return [
     `Acceptance (recorded self-attestation ${acceptance.id} [${acceptance.kind}]; not proof of presence, verification, or delegation):`,
     `  Statement: ${indented(acceptance.statement, '    ')}`,
     `  Known gaps: ${acceptance.knownGapIds.join(', ') || 'none recorded'}; recorded: ${acceptance.recordedAt}.`,
-    `  State: ${state}.`,
+    `  State: ${acceptance.stateLabel}; ${changed}.`,
+    `  Reassessment signals (reported separately, not part of the count comparison): ${renderAcceptanceSignals(acceptance.reassessmentSignals)}.`,
+    ...(earlier.length > 0
+      ? [
+          `  Earlier acceptances retained in the record (${earlier.length}; superseded by ${acceptance.id}, not applied to it):`,
+          ...earlier.map((item) => `    ${item.id} [${item.kind}] recorded ${item.recordedAt}: ${indented(item.statement, '      ')}`),
+        ]
+      : ['  Earlier acceptances: none; this is the only recorded acceptance.']),
   ].join('\n');
 }
 
@@ -349,7 +366,12 @@ export function renderStatus(location: string, handoff: Handoff): string {
     `Practices: ${handoff.practices.map((item) => item.text).join(', ') || 'not recorded'}; scenarios: ${handoff.scenarios.length} recorded (${handoff.scenarios.filter((item) => item.criterionId !== null).length} linked to a criterion).`,
     handoff.acceptance === null
       ? 'Acceptance: not recorded.'
-      : `Acceptance: ${handoff.acceptance.id} [${handoff.acceptance.kind}] is ${handoff.acceptance.state}${handoff.acceptance.state === 'reassessment_needed' ? `; changed since: ${handoff.acceptance.changedSince.join(', ')}` : ''}; known gaps: ${handoff.acceptance.knownGapIds.join(', ') || 'none'}.`,
+      : [
+          `Acceptance: ${handoff.acceptance.id} [${handoff.acceptance.kind}] is ${handoff.acceptance.stateLabel}`,
+          handoff.acceptance.changedSince.length > 0 ? `; changed counts: ${handoff.acceptance.changedSince.join(', ')}` : '; no compared count changed',
+          `; known gaps: ${handoff.acceptance.knownGapIds.join(', ') || 'none'}`,
+          `. Reassessment signals (not part of the count comparison): ${renderAcceptanceSignals(handoff.acceptance.reassessmentSignals)}.`,
+        ].join(''),
     handoff.deliveryTargets.length === 0
       ? 'Delivery targets: not recorded.'
       : `Delivery targets (goals, not outcomes): ${handoff.deliveryTargets.map((item) => `${item.id} ${item.target}`).join(', ')}.`,

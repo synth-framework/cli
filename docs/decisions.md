@@ -26,8 +26,11 @@
   recorded self-attestation with known gaps (`accept`); it is not proof a human
   was present, not a verification, and recording it does not depend on
   freshness. The handoff reports whether the latest acceptance is current or
-  needs reassessment by comparing recorded counts. Delegation remains
-  unavailable.
+  needs reassessment by comparing recorded counts, and qualifies that state as
+  a count comparison only. Selected-input changes and drift assessments or
+  delivery targets recorded after the acceptance are reported as separate
+  reassessment signals; they never change the state. All recorded acceptances
+  are exposed as history. Delegation remains unavailable.
 - **Claims and corrections.** Consequential claims are entries (`claim` kind).
   Corrections are explicit revisions that retain the original text; detecting
   a change is not judging its meaning, and SYNTH does not declare claims true.
