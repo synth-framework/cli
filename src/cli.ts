@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+import { readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput } from './domain.js';
 import { addDriftAssessment, addRevision, captureBaseline, compareBaselines, type BaselineArea, type DriftFinding } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
-import { SynthError, usageError } from './errors.js';
+import { hasErrorCode, SynthError, usageError } from './errors.js';
 import { snapshotFile } from './fingerprint.js';
 import { HELP, renderAdded, renderComparison, renderHandoff, renderStatus } from './presentation.js';
 import { runSelectedCheck } from './runner.js';
@@ -20,11 +21,38 @@ async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
   try {
-    for await (const chunk of process.stdin) {
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      total += bytes.length;
-      if (total > MAX_STDIN_BYTES) throw usageError('Standard input exceeds the 1 MiB limit.');
-      chunks.push(bytes);
+    if (process.platform === 'win32') {
+      // Deferred platform: keep the stream-based read there.
+      for await (const chunk of process.stdin) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += bytes.length;
+        if (total > MAX_STDIN_BYTES) throw usageError('Standard input exceeds the 1 MiB limit.');
+        chunks.push(bytes);
+      }
+    } else {
+      // On POSIX, read fd 0 through the syscall path instead of libuv's poller:
+      // some Darwin kernels (observed on macOS 15.7.4 x86_64) never report
+      // EV_EOF to kqueue for an inherited O_NONBLOCK FIFO after the last writer
+      // closes, so a stream-based read would hang forever. read(2) itself
+      // reports EOF (0) correctly there; a blocking fd simply blocks in
+      // readSync, and a nonblocking fd returns EAGAIN, which we poll.
+      const buffer = Buffer.alloc(64 * 1024);
+      for (;;) {
+        let count: number;
+        try {
+          count = readSync(0, buffer, 0, buffer.length, null);
+        } catch (error) {
+          if (hasErrorCode(error, 'EAGAIN') || hasErrorCode(error, 'EWOULDBLOCK')) {
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+            continue;
+          }
+          throw error;
+        }
+        if (count === 0) break;
+        total += count;
+        if (total > MAX_STDIN_BYTES) throw usageError('Standard input exceeds the 1 MiB limit.');
+        chunks.push(Buffer.from(buffer.subarray(0, count)));
+      }
     }
   } catch (error) {
     if (error instanceof SynthError) throw error;
