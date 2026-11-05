@@ -223,7 +223,7 @@ await test('snapshotFile does not block when a regular file is swapped for a FIF
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-    const killer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    let killer;
     try {
       const tmpFifo = join(dir, 'fifo.tmp');
       for (let i = 0; i < 300; i++) {
@@ -237,6 +237,11 @@ await test('snapshotFile does not block when a regular file is swapped for a FIF
         renameSync(tmpFifo, target);
       }
       writeFileSync(stop, 'stop');
+      // Arm the watchdog only after the swap loop: on slow or low-core machines
+      // the loop alone can exceed 30s, and killing a healthy child mid-loop is a
+      // false failure. A child that truly blocks on the swapped-in FIFO is still
+      // caught by the 25s race timeout below.
+      killer = setTimeout(() => child.kill('SIGKILL'), 30_000);
       const result = await Promise.race([
         exited,
         new Promise((resolve) => setTimeout(() => resolve({ code: null, signal: 'TIMEOUT' }), 25_000).unref()),
@@ -253,7 +258,7 @@ await test('snapshotFile does not block when a regular file is swapped for a FIF
         `the lstat->open swap window was never exercised: ${out}`,
       );
     } finally {
-      clearTimeout(killer);
+      if (killer !== undefined) clearTimeout(killer);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
