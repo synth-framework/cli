@@ -329,7 +329,7 @@ test('minimal intention works in the independent, non-Git fixture and shows miss
     scenarios: 'available',
     checkExpectation: 'available',
     questionResolution: 'not_available',
-    gapAndActionResolution: 'not_available',
+    gapAndActionResolution: 'available',
     planAndDecisionSupersession: 'not_available',
   });
   const human = run(dir, ['handoff']);
@@ -562,6 +562,74 @@ test('corrupt, unsupported, and structurally invalid records are visible and nev
     assert.equal(readFileSync(file, 'utf8'), contents);
     assert.equal(existsSync(`${file}.lock`), false);
   }
+});
+
+test('gap and next-action resolution keeps history and changes the open counts (AUD-06)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Uncertain area', '--json']), 'add');
+  jsonSuccess(run(dir, ['add', 'next', '--text', 'Follow up on the area', '--json']), 'add');
+  let handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.capabilities.gapAndActionResolution, 'available');
+  assert.equal(handoff.qaCoverage.risks.openGaps, 1);
+  assert.equal(handoff.gaps[0].resolved, null);
+
+  jsonFailure(run(dir, ['resolve', 'gap', 'G1', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['resolve', 'criterion', 'C1', '--reason', 'Nope', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['resolve', 'gap', 'G9', '--reason', 'Nope', '--json']), 2, 'USAGE_ERROR');
+  jsonFailure(run(dir, ['reopen', 'gap', 'G1', '--reason', 'Not resolved yet', '--json']), 2, 'USAGE_ERROR');
+
+  const resolved = jsonSuccess(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Area was verified', '--json']), 'resolve').entry;
+  assert.equal(resolved.resolved, true);
+  assert.match(resolved.resolvedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(resolved.resolutionReason, 'Area was verified');
+  assert.deepEqual(resolved.resolutionHistory.map((event) => event.state), ['resolved']);
+  assert.equal(resolved.text, 'Uncertain area');
+
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.qaCoverage.risks.openGaps, 0);
+  assert.equal(handoff.gaps[0].resolved, true);
+  assert.equal(handoff.nextActions[0].resolved, null);
+  let human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Resolved at /);
+  assert.match(human.stdout, /Resolution history: resolved at /);
+
+  jsonFailure(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Again', '--json']), 2, 'USAGE_ERROR');
+  const reopened = jsonSuccess(run(dir, ['reopen', 'gap', 'G1', '--reason', 'Area became uncertain again', '--json']), 'reopen').entry;
+  assert.equal(reopened.resolved, false);
+  assert.equal(reopened.resolutionReason, 'Area became uncertain again');
+  assert.deepEqual(reopened.resolutionHistory.map((event) => event.state), ['resolved', 'reopened']);
+
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.qaCoverage.risks.openGaps, 1);
+  assert.equal(handoff.gaps[0].resolved, false);
+  human = run(dir, ['handoff']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /Reopened at /);
+  assert.match(human.stdout, /Resolution history: resolved at .*reopened at /);
+
+  const resolvedAction = jsonSuccess(run(dir, ['resolve', 'next', 'N1', '--reason', 'Follow-up done', '--json']), 'resolve').entry;
+  assert.equal(resolvedAction.resolved, true);
+  handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.nextActions[0].resolved, true);
+});
+
+test('resolution works on records migrated from older schemas (AUD-06)', () => {
+  const dir = fixture();
+  initialize(dir);
+  jsonSuccess(run(dir, ['add', 'gap', '--text', 'Legacy gap', '--json']), 'add');
+  const file = recordFile(dir);
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  record.schemaVersion = 4;
+  record.entries = record.entries.map(({ criterionId, ...rest }) => rest);
+  writeFileSync(file, JSON.stringify(record, null, 2));
+  jsonSuccess(run(dir, ['resolve', 'gap', 'G1', '--reason', 'Legacy resolved', '--json']), 'resolve');
+  const stored = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(stored.schemaVersion, 5);
+  assert.equal(stored.entries[0].resolved, true);
+  const handoff = jsonSuccess(run(dir, ['handoff', '--json']), 'handoff').handoff;
+  assert.equal(handoff.gaps[0].resolved, true);
 });
 
 test('hostile non-string enum fields are corrupt records, never stringified (AUD-10)', () => {

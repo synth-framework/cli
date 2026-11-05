@@ -184,7 +184,7 @@ export function computeQaCoverage(state: WorkRecordV5, criteria: readonly Criter
       unintendedOrUncertain: state.driftAssessments.filter((item) => item.finding === 'unintended' || item.finding === 'uncertain').length,
     },
     risks: {
-      openGaps: state.entries.filter((entry) => entry.kind === 'gap').length,
+      openGaps: state.entries.filter((entry) => entry.kind === 'gap' && entry.resolved !== true).length,
       unknownSelectedFiles: comparison ? Object.values(comparison.areas).reduce((sum, area) => sum + area.unknownFileCount, 0) : null,
     },
     practices: state.entries.filter((entry) => entry.kind === 'practice').map((entry) => entry.text),

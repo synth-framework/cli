@@ -19,6 +19,10 @@ Usage:
     [--cwd <path>] [--revision <text>] [--dirty clean|dirty|unknown] [--output-ref <reference>]
     [--record <path>] [--json] -- <executable> [arguments...]
   synth check reconcile <id> --status skipped|inconclusive --reason <text> [--record <path>] [--json]
+  synth resolve gap <id> --reason <text> [--record <path>] [--json]
+  synth reopen gap <id> --reason <text> [--record <path>] [--json]
+  synth resolve next <id> --reason <text> [--record <path>] [--json]
+  synth reopen next <id> --reason <text> [--record <path>] [--json]
   synth evidence add [--criterion <id>] --summary <text> --source <text>
     --subject <text> --limitations <text> [--check <id>] [--revision <text>]
     [--artifact <reference>] [--subject-file <path>] [--record <path>] [--json]
@@ -106,6 +110,9 @@ function renderEntries(title: string, entries: readonly Entry[], options: { deci
     const revised = 'active' in entry && 'revisionId' in entry && 'originalText' in entry ? entry as Entry & { active: boolean; revisionId: string | null; originalText: string } : null;
     lines.push(`  ${entry.id}${revised && !revised.active ? ' [removed]' : ''}: ${indented(entry.text)}`);
     if (revised?.revisionId) lines.push(`    Current revision: ${revised.revisionId}; original: ${indented(revised.originalText, '      ')}`);
+    if (entry.resolved === true) lines.push(`    Resolved at ${entry.resolvedAt}; reason: ${indented(entry.resolutionReason ?? '', '      ')}.`);
+    else if (entry.resolved === false) lines.push(`    Reopened at ${entry.resolvedAt}; reason: ${indented(entry.resolutionReason ?? '', '      ')}.`);
+    if (entry.resolutionHistory && entry.resolutionHistory.length > 0) lines.push(`    Resolution history: ${entry.resolutionHistory.map((event) => `${event.state} at ${event.at}`).join('; ')}.`);
     if (entry.reason !== null) lines.push(`    Reason: ${indented(entry.reason, '      ')}`);
     else if (options.decisions) lines.push('    Reason: not recorded.');
   }

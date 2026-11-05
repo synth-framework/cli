@@ -2,7 +2,7 @@
 import { readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput } from './domain.js';
+import { appendEntries, makeHandoff, newRecord, parseEntryBatch, parseEntryInput, resolveEntry } from './domain.js';
 import { addDriftAssessment, addRevision, captureBaseline, compareBaselines, type BaselineArea, type DriftFinding } from './baseline.js';
 import { upgradeRecord } from './evolution.js';
 import { hasErrorCode, SynthError, usageError } from './errors.js';
@@ -155,6 +155,8 @@ async function main(argv: string[]): Promise<void> {
       revise: ['record', 'json', 'text', 'remove', 'reason', 'evidence'],
       baseline: ['record', 'json', 'reason', 'file', 'no-files', 'to', 'area', 'finding', 'evidence'],
       accept: ['record', 'json', 'statement', 'gap', 'reassess'],
+      resolve: ['record', 'json', 'reason'],
+      reopen: ['record', 'json', 'reason'],
       deliver: ['record', 'json', 'target', 'text', 'reason'],
     };
     const commandOptions = Object.hasOwn(allowed, command) ? allowed[command] : undefined;
@@ -374,6 +376,21 @@ async function main(argv: string[]): Promise<void> {
         return { record: next.record, result: next.acceptance };
       });
       writeSuccess(command, { recordPath: location, acceptance }, `Recorded ${acceptance.kind} acceptance ${acceptance.id} with ${acceptance.knownGapIds.length} known gap(s); it is a recorded self-attestation, not proof of presence or verification.`);
+      return;
+    }
+    if (command === 'resolve' || command === 'reopen') {
+      const kind = positionals[1];
+      if (kind !== 'gap' && kind !== 'next') throw usageError('Use resolve gap <id>, reopen gap <id>, resolve next <id>, or reopen next <id>.');
+      if (positionals.length !== 3) throw usageError(`Use ${command} ${kind} <id> --reason <text>.`);
+      const id = positionals[2]!;
+      if (!/^(G|N)[1-9][0-9]*$/.test(id)) throw usageError('Provide the gap or next-action ID, e.g. G1 or N1.');
+      const reason = requiredText(values.reason, '--reason');
+      const state = command === 'resolve' ? 'resolved' : 'reopened';
+      const entry = updateRecord(location, (record) => {
+        const next = resolveEntry(record, kind as 'gap' | 'next', id, { state, reason });
+        return { record: next.record, result: next.entry };
+      });
+      writeSuccess(command, { recordPath: location, entry }, `Recorded ${command === 'resolve' ? 'resolution' : 'reopening'} of ${kind} ${entry.id} at ${entry.resolvedAt}; earlier resolution state stays in history.`);
       return;
     }
     if (command === 'deliver') {
