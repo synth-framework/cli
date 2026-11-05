@@ -16,6 +16,7 @@ synchronization.
 - [Milestone #4 — Slice 4 — Exercise quality practices](https://github.com/synth-framework/cli/milestone/4)
 - [Milestone #5 — Final stage — platform validation (macOS, Windows/WSL2)](https://github.com/synth-framework/cli/milestone/5)
 - [Milestone #6 — Slice 5 — audit hardening + npm distribution prep](https://github.com/synth-framework/cli/milestone/6)
+- [Milestone #7 — Final stage — independent adoption audit (gated on Slice 5 #32-#40)](https://github.com/synth-framework/cli/milestone/7)
 
 ## Issues
 
@@ -64,6 +65,10 @@ synchronization.
 - [#38 AUD-10: malformed enum/object fields must be RECORD_CORRUPT not INTERNAL_ERROR](https://github.com/synth-framework/cli/issues/38)
 - [#39 AUD-07: explicit reconciliation for pending checks](https://github.com/synth-framework/cli/issues/39)
 - [#40 AUD-11: reconcile docs and issue-evidence leftovers](https://github.com/synth-framework/cli/issues/40)
+
+### Final stage — independent adoption audit (gated on #32-#40)
+
+- [#41 ADOPT-01: independent adoption-fixture audit (installed-package, E2E, platform, dev+agent)](https://github.com/synth-framework/cli/issues/41)
 
 ## Housekeeping notes
 
