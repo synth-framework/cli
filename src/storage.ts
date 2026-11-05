@@ -1,12 +1,13 @@
 import {
   closeSync,
+  constants,
   fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -42,30 +43,47 @@ function alreadyExists(location: string): SynthError {
   );
 }
 
-function regularFileExists(location: string): boolean {
+function notRegular(location: string): SynthError {
+  return new SynthError('IO_ERROR', `"${location}" is not a regular record file; symlink targets are not supported.`, 3);
+}
+
+/**
+ * Open the record without following a final symlink and without blocking on a
+ * FIFO, then validate and read the opened descriptor itself. A path swapped
+ * between any earlier lstat and this open (AUD-08 TOCTOU) can never be read:
+ * symlinks fail with ELOOP, FIFOs/directories fail the regular-file check.
+ */
+function readRecordBytes(location: string): Buffer {
+  let descriptor: number;
   try {
-    const stat = lstatSync(location);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new SynthError('IO_ERROR', `"${location}" is not a regular record file; symlink targets are not supported.`, 3);
-    }
-    return true;
+    descriptor = openSync(location, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
   } catch (error) {
-    if (error instanceof SynthError) throw error;
-    if (hasErrorCode(error, 'ENOENT')) return false;
-    throw ioError('inspect', location, error);
+    if (hasErrorCode(error, 'ENOENT')) throw notFound(location);
+    if (hasErrorCode(error, 'ELOOP')) throw notRegular(location);
+    throw ioError('open', location, error);
+  }
+  try {
+    if (!fstatSync(descriptor).isFile()) throw notRegular(location);
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(64 * 1024);
+    for (;;) {
+      let count: number;
+      try {
+        count = readSync(descriptor, buffer, 0, buffer.length, null);
+      } catch (error) {
+        throw ioError('read', location, error);
+      }
+      if (count === 0) break;
+      chunks.push(Buffer.from(buffer.subarray(0, count)));
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    closeSync(descriptor);
   }
 }
 
 export function readRecord(location: string): WorkRecord {
-  if (!regularFileExists(location)) throw notFound(location);
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(location);
-  } catch (error) {
-    if (hasErrorCode(error, 'ENOENT')) throw notFound(location);
-    throw ioError('read', location, error);
-  }
-  return decodeRecord(bytes, location);
+  return decodeRecord(readRecordBytes(location), location);
 }
 
 /** A lock coordinates only writers that use the same path and honor this protocol. */

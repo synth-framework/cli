@@ -505,6 +505,29 @@ test('explicit record paths work without discovering or creating a default recor
   jsonFailure(run(dir, ['status', '--record', alias, '--json']), 3, 'IO_ERROR');
 });
 
+test('a FIFO or directory at the record path is rejected without blocking, leaving no lock', { timeout: 10_000 }, () => {
+  const dir = fixture();
+  initialize(dir);
+  const file = recordFile(dir);
+  // AUD-08: the record is opened without following a final symlink and read
+  // from the opened descriptor, so a path swapped before the open (symlink,
+  // FIFO) is rejected at open/fstat time and can never be read or block.
+  unlinkSync(file);
+  const created = spawnSync('mkfifo', [file], { encoding: 'utf8', timeout: 5_000 });
+  if (created.error === undefined) {
+    assert.equal(created.status, 0, created.stderr);
+    jsonFailure(run(dir, ['status', '--json']), 3, 'IO_ERROR');
+    assert.equal(existsSync(`${file}.lock`), false);
+    unlinkSync(file);
+  }
+  mkdirSync(file);
+  jsonFailure(run(dir, ['status', '--json']), 3, 'IO_ERROR');
+  assert.equal(existsSync(`${file}.lock`), false);
+  rmSync(file, { recursive: true, force: true });
+  initialize(dir);
+  jsonSuccess(run(dir, ['status', '--json']), 'status');
+});
+
 test('corrupt, unsupported, and structurally invalid records are visible and never reset', () => {
   const dir = fixture();
   initialize(dir);
