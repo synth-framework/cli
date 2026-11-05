@@ -355,6 +355,20 @@ macOS design target is not a substitute for running this procedure on macOS.
 A separate remote workspace/container should likewise be reported as tested
 only after the procedure is run there.
 
+### Recorded validation results
+
+These procedures have been run on real machines and containers, each passing
+the full suite (80/80 tests, 0 skipped) on the tree merged as `ef802f9`:
+
+- macOS 15.7.4 (x86_64, Darwin 24.6.0), Node v22 — issue #26, comment 6660008615;
+  the Windows/WSL2 run (Node v22.22.1) is recorded in the same issue
+- remote Linux container: `node:22-bookworm` (digest sha256:f6f56d63…), OrbStack
+  LinuxVM kernel 6.7.11, Node v22.23.4 — issue #9, comment 6660791107
+- remote CI runner: ubuntu-latest, run 42041576167 on `ef802f9`
+
+Native Windows remains deferred and unverified. Report new platform results in
+the backlog issues rather than by editing this list.
+
 For an interactive fixture walkthrough from the repository root, first choose a
 `TMPDIR` outside the checkout and outside Git repository ancestors, and run in a
 shell where `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and

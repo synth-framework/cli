@@ -95,11 +95,17 @@
   polls `fs.readSync(0, …)` (10 ms on `EAGAIN`) on Linux/macOS and keeps the
   stream path on Windows, which remains a deferred platform.
 
+- **FV-01 platform validation is recorded, not open.** By developer decision
+  (2026-11-03), macOS and Windows/WSL2 validation was pushed to the final stage
+  (FV-01, issue #26; representative remote-workspace results stayed with S1-05,
+  issue #9). Those runs have since been executed and each passed the full suite
+  (80/80, 0 skipped) on the tree merged as `ef802f9`: macOS 15.7.4 x86_64 (#26,
+  comment 6660008615), Windows/WSL2 (#26), a remote `node:22-bookworm` Linux
+  container (#9, comment 6660791107), and the ubuntu-latest CI runner (run
+  42041576167). Native Windows remains deferred and unverified. Platform targets
+  are not evidence of platform validation; only the recorded runs above count.
+
 ## Open decisions
 
-Broader project-wide and automated semantic drift assessment, delegation of
-acceptance, and actual macOS and representative remote workspace results remain
-open. By developer decision (2026-11-03), macOS and Windows/WSL2 validation is
-pushed to the final stage (after Slice 4), tracked as backlog issue FV-01 under
-the final-stage milestone; representative remote-workspace results stay with
-S1-05. Platform targets are not evidence of platform validation.
+Broader project-wide and automated semantic drift assessment and delegation of
+acceptance remain open.

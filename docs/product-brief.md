@@ -37,11 +37,15 @@ targets. Use the same CLI whether an agent runs commands locally or in a remote
 workspace or Linux container. That does not require a hosted SYNTH service,
 remote orchestration, cross-machine synchronization, or a new networking layer.
 The coding agent itself may use online services. Actual platform results must
-be reported separately from these targets. Native Windows is deferred; WSL2 is
-provisional until tested. By developer decision (2026-11-03), actual validation
-runs on macOS and on Windows/WSL2 are pushed to the final stage (after Slice 4);
-until they are run there, those platforms remain explicitly unverified, and no
-platform support is claimed from design intent or from another OS's results.
+be reported separately from these targets. Native Windows remains deferred.
+Final-stage validation has since been run on real machines and containers
+(FV-01, issue #26; representative remote workspace, S1-05, issue #9): macOS
+15.7.4 x86_64, Windows/WSL2, a remote `node:22-bookworm` Linux container, and
+the ubuntu-latest CI runner each passed the full suite (80/80 tests, 0 skipped)
+on the tree merged as `ef802f9`; environments and outputs are recorded in the
+linked issues (comments 6660008615 and 6660791107) and CI run 42041576167. No
+platform support is claimed from design intent or from another OS's results —
+only those recorded runs count.
 
 ## Non-goals
 
