@@ -332,7 +332,10 @@ alter Git discovery. The subshell above unsets them for the test without
 changing your shell. If necessary, choose a safe `TMPDIR` and rerun the tests.
 On macOS and Linux, the nonblocking-input regression uses the POSIX `mkfifo`
 utility and reports a skip when it is unavailable; a skipped regression is not
-a verified result.
+a verified result. On POSIX the CLI reads stdin through the `read(2)` syscall
+path (polling on `EAGAIN`), because some Darwin kernels never report `EV_EOF`
+to kqueue/libuv for an inherited nonblocking FIFO — the syscall path reports
+EOF correctly, so the full producer-to-EOF path is exercised on macOS too.
 
 ### Exact macOS validation procedure
 

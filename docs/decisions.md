@@ -87,6 +87,14 @@
   baseline, decisions, and instructions, not a synchronized copy of issue
   status. No automatic synchronization is planned.
 
+- **POSIX stdin is read via `read(2)`, not libuv's poller.** Validation on
+  macOS 15.7.4 x86_64 (Darwin kernel 24.6.0, observed during FV-01) showed that
+  kqueue never reports `EV_EOF` for an inherited `O_NONBLOCK` FIFO after the
+  last writer closes, so a stream-based `for await (process.stdin)` hung
+  forever while a raw `read(2)` returned EOF (0) correctly. The CLI therefore
+  polls `fs.readSync(0, …)` (10 ms on `EAGAIN`) on Linux/macOS and keeps the
+  stream path on Windows, which remains a deferred platform.
+
 ## Open decisions
 
 Broader project-wide and automated semantic drift assessment, delegation of
